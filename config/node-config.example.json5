@@ -1,0 +1,17 @@
+{
+  // Every node controls one robot through one network interface.
+  robot_key: "unitree/go2",
+
+  dds: {
+    domain_id: 0,
+    network_interface: "enp2s0",
+    // Keep SDK calls bounded within the local motion watchdog interval.
+    rpc_timeout_seconds: 0.2,
+  },
+
+  safety: {
+    command_timeout_seconds: 0.25,
+    posture_transition_seconds: 3.0,
+    shutdown_stop_delay_seconds: 1.0,
+  },
+}

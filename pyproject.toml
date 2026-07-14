@@ -1,0 +1,37 @@
+[project]
+name = "unitree-go2-zenoh-node"
+version = "0.1.0"
+description = "Control a Unitree Go2 SportClient through Zenoh"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "eclipse-zenoh>=1.9.0",
+    "json5>=0.15.0",
+    "pydantic>=2.13.4",
+    "unitree-sdk2py",
+]
+
+[tool.uv.sources]
+unitree-sdk2py = { path = "third_party/unitree_sdk2_python", editable = true }
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+    "ruff>=0.15.21",
+]
+example = [
+    "pygame>=2.6.1",
+]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+include = ["controller.py", "models.py", "node.py", "settings.py", "examples", "tests"]
+exclude = ["third_party"]
+extraPaths = ["third_party/unitree_sdk2_python"]
+
+[tool.ruff]
+extend-exclude = ["third_party"]
+
+[tool.ruff.lint]
+extend-select = ["B", "I", "RUF", "SIM", "UP"]

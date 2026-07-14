@@ -1,0 +1,24 @@
+{
+  robot_key: "unitree/go2",
+  publish_frequency_hz: 20.0,
+
+  // Conservative operator targets, not the SDK validation limits.
+  targets: {
+    vx: 0.5,
+    vy: 0.3,
+    vyaw: 1.0,
+  },
+
+  // Maximum change per second for the keyboard-generated command.
+  ramp_rates: {
+    vx: 1.0,
+    vy: 0.8,
+    vyaw: 2.0,
+  },
+
+  // Reliable posture commands are retried until the node reports the target.
+  posture_requests: {
+    retry_interval_seconds: 0.5,
+    timeout_seconds: 10.0,
+  },
+}
