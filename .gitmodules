@@ -1,0 +1,4 @@
+[submodule "third_party/unitree_sdk2_python"]
+	path = third_party/unitree_sdk2_python
+	url = https://github.com/Oya-Tomo/unitree_sdk2_python.git
+	branch = chore/cdds-py313
