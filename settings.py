@@ -14,6 +14,8 @@ from pydantic import (
     model_validator,
 )
 
+from models import VX_MAX, VX_MIN, VY_MAX, VYAW_MAX
+
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 PositiveFiniteFloat = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
 
@@ -57,6 +59,7 @@ class SafetyConfig(ConfigModel):
 
 class NodeConfig(ConfigModel):
     robot_key: StrictStr
+    state_heartbeat_seconds: PositiveFiniteFloat
     dds: DdsConfig
     safety: SafetyConfig
 
@@ -65,15 +68,53 @@ class NodeConfig(ConfigModel):
     def validate_robot_key(cls, value: str) -> str:
         return validate_concrete_key(value, "robot_key")
 
+
+class VelocityTargets(ConfigModel):
+    # W and S share one magnitude, so vx honors the smaller reverse limit.
+    vx: Annotated[
+        float,
+        Field(strict=True, gt=0, le=min(abs(VX_MIN), VX_MAX), allow_inf_nan=False),
+    ]
+    vy: Annotated[float, Field(strict=True, gt=0, le=VY_MAX, allow_inf_nan=False)]
+    vyaw: Annotated[float, Field(strict=True, gt=0, le=VYAW_MAX, allow_inf_nan=False)]
+
+
+class RampRates(ConfigModel):
+    vx: PositiveFiniteFloat
+    vy: PositiveFiniteFloat
+    vyaw: PositiveFiniteFloat
+
+
+class PostureRequestConfig(ConfigModel):
+    retry_interval_seconds: PositiveFiniteFloat
+    timeout_seconds: PositiveFiniteFloat
+
     @model_validator(mode="after")
-    def validate_rpc_timeout(self) -> Self:
-        if self.dds.rpc_timeout_seconds > self.safety.command_timeout_seconds:
-            raise ValueError(
-                "dds.rpc_timeout_seconds must not exceed safety.command_timeout_seconds"
-            )
+    def validate_timeout(self) -> Self:
+        if self.timeout_seconds <= self.retry_interval_seconds:
+            raise ValueError("timeout_seconds must exceed retry_interval_seconds")
         return self
+
+
+class KeyboardConfig(ConfigModel):
+    robot_key: StrictStr
+    publish_frequency_hz: PositiveFiniteFloat
+    state_stale_after_seconds: PositiveFiniteFloat
+    targets: VelocityTargets
+    ramp_rates: RampRates
+    posture_requests: PostureRequestConfig
+
+    @field_validator("robot_key")
+    @classmethod
+    def validate_robot_key(cls, value: str) -> str:
+        return validate_concrete_key(value, "robot_key")
 
 
 def load_node_config(path: Path) -> NodeConfig:
     with path.open(encoding="utf-8") as config_file:
         return NodeConfig.model_validate(json5.load(config_file))
+
+
+def load_keyboard_config(path: Path) -> KeyboardConfig:
+    with path.open(encoding="utf-8") as config_file:
+        return KeyboardConfig.model_validate(json5.load(config_file))

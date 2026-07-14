@@ -1,6 +1,8 @@
 {
   robot_key: "unitree/go2",
   publish_frequency_hz: 20.0,
+  // Mark the dashboard stale if state heartbeats stop arriving.
+  state_stale_after_seconds: 2.5,
 
   // Conservative operator targets, not the SDK validation limits.
   targets: {

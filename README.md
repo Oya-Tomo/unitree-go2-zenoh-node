@@ -20,7 +20,7 @@ high-level policy or pygame keyboard node
        unitree-go2-zenoh-node
        - Pydantic validation
        - posture state machine
-       - 250 ms watchdog
+       - best-effort 250 ms watchdog
        - observable state/queryables
                   |
                   | Unitree SDK2 / CycloneDDS
@@ -67,7 +67,9 @@ cp examples/keyboard-zenoh-config.example.json5 examples/keyboard-zenoh-config.j
 
 Set `dds.network_interface` to the NIC connected to the robot. Set the same
 `robot_key` in the robot node and every command publisher. The example key is
-`unitree/go2`, but it may be changed to any concrete Zenoh key.
+`unitree/go2`, but it may be changed to any concrete Zenoh key. The node
+republishes all state every `state_heartbeat_seconds`; the keyboard marks state
+stale after `state_stale_after_seconds` without a new heartbeat.
 
 Both Zenoh examples use peer mode, multicast discovery, and the fixed listen
 endpoint `tcp/0.0.0.0:7447`. They intentionally provide no TLS, authentication,
@@ -140,7 +142,8 @@ clipping. Publishers must filter their own output and publish velocity at 20 Hz.
 The operational policy is to begin with the robot physically down. The process
 does not claim that posture without telemetry: on startup it calls `StopMove()`,
 publishes posture `unknown`, and ignores velocity until an explicit stand
-sequence succeeds.
+sequence succeeds. A failed startup stop is retried while the node remains
+non-walkable.
 
 ```text
 unknown/down -- stand --> standing_up -- 3 s + BalanceStand --> standing
@@ -149,33 +152,43 @@ standing    -- down  --> standing_down -- StandDown ----------> down
 
 - Stand: `StopMove()` → `StandUp()` → configured delay (3 s by default) →
   `BalanceStand()` → enable walking.
-- Down: disable walking → `StopMove()` → `StandDown()`.
+- Down: disable walking → `StopMove()` → `StandDown()`. A failed stop remains a
+  pending down transition and is retried; `StandDown()` is never issued before
+  stop success is confirmed.
+- Pending posture input is a desired state, not a replay queue. Only one target
+  is dispatched per control-loop drain, and a pending `down` cannot be replaced
+  by a later `stand` burst. A new deliberate `stand` may be sent after that
+  `down` has been drained.
 - Velocity is ignored unless posture is `standing` and `walking_enabled` is true.
-- The monotonic 250 ms watchdog calls `StopMove()` once after the last forwarded
-  velocity becomes stale. A fresh valid velocity command resumes forwarding;
-  invalid messages do not refresh the watchdog.
-- `dds.rpc_timeout_seconds` must not exceed the watchdog interval; the example
-  uses 200 ms so a stalled synchronous SDK call is bounded.
-- Graceful `SIGINT`/`SIGTERM` shutdown performs `StopMove()` → 1 s delay →
-  `StandDown()` before closing Zenoh resources.
+- After the last forwarded velocity becomes stale, the monotonic watchdog calls
+  `StopMove()`. A failed stop inhibits new velocity and is retried at a bounded
+  interval until confirmed. `watchdog_triggered` refers only to this timeout,
+  not to an ordinary SDK failure.
+- The watchdog is a best-effort control-loop threshold, not a hard real-time
+  deadline. SDK calls are synchronous and block the same thread.
+  `dds.rpc_timeout_seconds` bounds each SDK request phase; one reply-bearing call
+  may contain more than one such phase and may therefore delay watchdog service.
+- Graceful `SIGINT`/`SIGTERM` shutdown attempts `StopMove()`, waits 1 s, retries
+  once after failure, and calls `StandDown()` only after a confirmed stop.
 - A hard process, host, or power failure cannot guarantee the down sequence.
 
 ## State keys
 
-The node publishes state changes with Zenoh `put` and declares an exact
-Queryable for every key, so late clients can issue `get` requests.
+The node publishes state changes with Zenoh `put`, republishes a periodic state
+heartbeat, and declares an exact Queryable for every key. Late clients can issue
+`get` requests, and live subscribers can detect a stale node locally.
 
 | Key | Meaning |
 | --- | --- |
 | `{robot_key}/state/command/requested` | Last valid velocity received, even when motion was inhibited |
-| `{robot_key}/state/command/applied` | Last velocity successfully forwarded to the SDK |
+| `{robot_key}/state/command/applied` | Current commanded-velocity estimate: last successful `Move`, reset to zero after successful `StopMove` |
 | `{robot_key}/state/posture` | `unknown`, `standing_up`, `standing`, `standing_down`, or `down` |
 | `{robot_key}/state/health` | Node status and safety flags |
 
 Velocity state example:
 
 ```json
-{"vx":0.5,"vy":0.0,"vyaw":0.2,"active":true}
+{"vx":0.5,"vy":0.0,"vyaw":0.2}
 ```
 
 Health state example:
@@ -189,8 +202,8 @@ Health state example:
 }
 ```
 
-`applied` means that the SDK call returned success. It is not physical velocity
-or posture feedback from robot telemetry.
+`applied` is derived from successful SDK return codes. It is not physical
+velocity or posture feedback from robot telemetry.
 
 ## Pygame controls
 
@@ -205,7 +218,7 @@ Shift is the motion deadman and is also required for posture commands.
 | `Shift+F` | Go down with `StandDown()` |
 | `Space` | Publish zero velocity immediately |
 | Release `Shift` | Publish zero velocity immediately |
-| Window loses focus | Publish zero and require Shift release before re-arming |
+| Window loses focus | Publish zero, cancel pending stand retries, and require Shift release before any motion or posture command re-arms |
 | `Esc` or close window | Publish zero velocity and exit |
 
 Multiple motion axes may be held simultaneously. The keyboard node ramps toward
@@ -213,7 +226,10 @@ its configured targets, publishes at 20 Hz, and displays requested/applied
 velocity, posture, walking enablement, watchdog state, health, and deadman state.
 Velocity uses best-effort/drop QoS. Stand/down uses a separate reliable/blocking
 publisher on the same command key and retries until the reported target posture
-is observed or the configured timeout is shown as an operator error.
+is observed in a state sample newer than the request, or the configured timeout
+is shown as an operator error. Losing focus, releasing Shift, or exiting cancels
+pending `stand` retries; an already-requested safety `down` remains eligible for
+retry while the keyboard node continues running.
 
 ## Development checks
 

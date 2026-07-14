@@ -16,15 +16,20 @@ from typing import Any
 import zenoh
 from pydantic import BaseModel, ValidationError
 
-from command_mailbox import CommandBatch, CommandMailbox
-from controller import RobotController, SportClientProtocol, StateSink
+from command_mailbox import CommandMailbox, InvalidCommand, PendingCommands
+from controller import (
+    ControllerTiming,
+    RobotController,
+    SportClientProtocol,
+    StateSink,
+)
+from keyspace import RobotKeyspace
 from models import HealthState, PostureState, VelocityState
 from settings import NodeConfig, load_node_config
 
 DEFAULT_NODE_CONFIG_PATH = Path("config/node-config.json5")
 DEFAULT_ZENOH_CONFIG_PATH = Path("config/zenoh-config.json5")
 CONTROL_LOOP_PERIOD_SECONDS = 0.01
-POSTURE_COMMANDS_PER_TICK = 4
 JSON_ENCODING = "application/json"
 LOGGER = logging.getLogger(__name__)
 
@@ -53,11 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
 class ZenohStateBus(StateSink):
     def __init__(self, session: zenoh.Session, robot_key: str) -> None:
         self._session = session
+        keyspace = RobotKeyspace(robot_key)
         self._keys = {
-            "requested": f"{robot_key}/state/command/requested",
-            "applied": f"{robot_key}/state/command/applied",
-            "posture": f"{robot_key}/state/posture",
-            "health": f"{robot_key}/state/health",
+            "requested": keyspace.requested_velocity,
+            "applied": keyspace.applied_velocity,
+            "posture": keyspace.posture,
+            "health": keyspace.health,
         }
         self._payloads: dict[str, str] = {}
         self._lock = Lock()
@@ -119,26 +125,19 @@ def create_sport_client(config: NodeConfig) -> SportClientProtocol:
 
 def dispatch_commands(
     controller: RobotController,
-    batch: CommandBatch,
+    pending: PendingCommands,
     *,
-    command_timeout_seconds: float,
     clock: Callable[[], float] = time.monotonic,
 ) -> None:
-    for received in batch.postures:
-        controller.handle_command(received.command, now=received.received_at)
-
-    velocity = batch.velocity
-    if velocity is not None:
-        age = clock() - velocity.received_at
-        if age <= command_timeout_seconds:
-            controller.handle_command(velocity.command, now=velocity.received_at)
+    for event in pending.in_receive_order():
+        if isinstance(event, InvalidCommand):
+            controller.report_command_error(event.error)
         else:
-            controller.report_command_error(
-                f"stale velocity command dropped after {age:.3f} seconds"
+            controller.handle_command(
+                event.command,
+                received_at=event.received_at,
+                now=clock(),
             )
-
-    if batch.invalid_error is not None:
-        controller.report_command_error(batch.invalid_error)
     controller.tick(now=clock())
 
 
@@ -166,7 +165,7 @@ def run(
     sport_client: SportClientProtocol | None = None,
 ) -> None:
     zenoh.init_log_from_env_or("error")
-    command_key = f"{node_config.robot_key}/command"
+    keyspace = RobotKeyspace(node_config.robot_key)
     command_mailbox = CommandMailbox()
     stop_event = Event()
 
@@ -182,27 +181,35 @@ def run(
     with (
         zenoh.open(zenoh_config) as session,
         ZenohStateBus(session, node_config.robot_key) as state_bus,
-        session.declare_subscriber(command_key, on_command),
+        session.declare_subscriber(keyspace.command, on_command),
         stop_on_signals(stop_event),
     ):
         controller = RobotController(
             client,
             state_bus,
-            command_timeout_seconds=node_config.safety.command_timeout_seconds,
-            posture_transition_seconds=node_config.safety.posture_transition_seconds,
-            shutdown_stop_delay_seconds=node_config.safety.shutdown_stop_delay_seconds,
+            ControllerTiming(
+                command_timeout_seconds=(node_config.safety.command_timeout_seconds),
+                posture_transition_seconds=(
+                    node_config.safety.posture_transition_seconds
+                ),
+                shutdown_stop_delay_seconds=(
+                    node_config.safety.shutdown_stop_delay_seconds
+                ),
+            ),
         )
-        LOGGER.info("Listening for commands on %s", command_key)
+        LOGGER.info("Listening for commands on %s", keyspace.command)
         controller.startup()
+        next_state_heartbeat = time.monotonic()
         try:
             while not stop_event.is_set():
                 dispatch_commands(
                     controller,
-                    command_mailbox.take(
-                        posture_limit=POSTURE_COMMANDS_PER_TICK,
-                    ),
-                    command_timeout_seconds=node_config.safety.command_timeout_seconds,
+                    command_mailbox.drain(),
                 )
+                now = time.monotonic()
+                if now >= next_state_heartbeat:
+                    controller.publish_state()
+                    next_state_heartbeat = now + node_config.state_heartbeat_seconds
                 stop_event.wait(CONTROL_LOOP_PERIOD_SECONDS)
         finally:
             controller.graceful_shutdown()

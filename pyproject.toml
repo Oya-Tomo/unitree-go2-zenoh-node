@@ -11,6 +11,9 @@ dependencies = [
     "unitree-sdk2py",
 ]
 
+[tool.uv]
+package = false
+
 [tool.uv.sources]
 unitree-sdk2py = { path = "third_party/unitree_sdk2_python", editable = true }
 
@@ -26,8 +29,8 @@ example = [
 [tool.pyright]
 venvPath = "."
 venv = ".venv"
-include = ["controller.py", "models.py", "node.py", "settings.py", "examples", "tests"]
-exclude = ["third_party"]
+include = ["."]
+exclude = [".venv", "third_party"]
 extraPaths = ["third_party/unitree_sdk2_python"]
 
 [tool.ruff]

@@ -50,7 +50,7 @@ class ZenohStateBusTests(unittest.TestCase):
     def test_publishes_and_answers_queries_for_all_state_keys(self) -> None:
         session = FakeSession()
         with ZenohStateBus(session, "unitree/go2") as bus:  # type: ignore[arg-type]
-            bus.publish_requested(VelocityState(vx=0.5, vy=0.0, vyaw=0.0, active=True))
+            bus.publish_requested(VelocityState(vx=0.5, vy=0.0, vyaw=0.0))
             bus.publish_applied(VelocityState())
             bus.publish_posture(PostureState(posture=Posture.DOWN))
             bus.publish_health(HealthState())

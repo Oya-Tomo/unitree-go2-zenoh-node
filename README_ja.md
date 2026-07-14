@@ -21,7 +21,7 @@ Zenohで受け取った高レベルコマンドをUnitree Go2の`SportClient`へ
        unitree-go2-zenoh-node
        - Pydantic validation
        - 姿勢状態機械
-       - 250 ms watchdog
+       - best-effort 250 ms watchdog
        - 状態のput / Queryable
                   |
                   | Unitree SDK2 / CycloneDDS
@@ -67,7 +67,9 @@ cp examples/keyboard-zenoh-config.example.json5 examples/keyboard-zenoh-config.j
 
 `dds.network_interface`をロボット接続用NICへ変更してください。robot nodeと
 command publisherの`robot_key`は一致させます。例は`unitree/go2`ですが、任意の
-具体Zenoh keyへ変更できます。
+具体Zenoh keyへ変更できます。nodeは`state_heartbeat_seconds`ごとに全stateを
+再publishし、keyboardは`state_stale_after_seconds`の間に新しいheartbeatが
+届かなければstateをstale表示します。
 
 Zenohの例はpeer mode、multicast discovery、固定listen endpoint
 `tcp/0.0.0.0:7447`です。router、TLS、認証、認可は設定していません。信頼できる
@@ -137,7 +139,8 @@ policy出力を平滑化もclampもせずSDKへ渡します。各publisherが自
 
 運用上は実機を伏せ姿勢から始めます。ただしnodeはtelemetryなしに姿勢を断定
 しません。起動時に`StopMove()`を呼び、姿勢`unknown`を公開し、明示的なstandが
-成功するまで速度を無視します。
+成功するまで速度を無視します。起動時のstop失敗はnodeを歩行禁止に保ったまま
+再試行します。
 
 ```text
 unknown/down -- stand --> standing_up -- 3 s + BalanceStand --> standing
@@ -146,31 +149,38 @@ standing    -- down  --> standing_down -- StandDown ----------> down
 
 - Stand: `StopMove()` → `StandUp()` → 設定時間（既定3秒）→
   `BalanceStand()` → 歩行を有効化します。
-- Down: 歩行を無効化 → `StopMove()` → `StandDown()`です。
+- Down: 歩行を無効化 → `StopMove()` → `StandDown()`です。stop失敗中はdown遷移を
+  保留して再試行し、stop成功を確認する前に`StandDown()`を呼びません。
+- 保留姿勢は再生queueではなく目標状態として扱います。control loopの1回のdrainで
+  1目標だけを処理し、保留中の`down`は後続の`stand` burstで上書きされません。
+  `down`のdrain後は、新しい明示的な`stand`を受け付けます。
 - 姿勢が`standing`かつ`walking_enabled=true`のときだけ速度をSDKへ渡します。
-- monotonic clockの250 ms watchdogは、最後に渡した速度が古くなると
-  `StopMove()`を1回だけ呼びます。新しい有効速度で再開し、無効messageでは
-  watchdogを更新しません。
-- `dds.rpc_timeout_seconds`はwatchdog時間以下でなければならず、例では同期SDK
-  callの停滞を抑えるため200 msです。
-- 正常な`SIGINT`/`SIGTERM`終了時は`StopMove()` → 1秒待機 → `StandDown()`の後で
-  Zenoh resourceを閉じます。
+- 最後にSDKへ渡した速度が古くなるとmonotonic watchdogが`StopMove()`を呼びます。
+  stop失敗中は速度を禁止し、確認できるまで一定間隔で再試行します。
+  `watchdog_triggered`はこのtimeoutだけを表し、通常のSDK failureには使いません。
+- watchdogはcontrol loop上のbest-effortな閾値で、hard real-time deadlineでは
+  ありません。SDK callは同期的で同じthreadをblockします。
+  `dds.rpc_timeout_seconds`はSDK requestの各phaseを制限しますが、replyを伴う
+  1 callに複数phaseがあり、watchdog処理が遅れる場合があります。
+- 正常な`SIGINT`/`SIGTERM`終了時は`StopMove()`を試し、1秒待ち、失敗時だけ
+  もう1回試します。stop成功を確認した場合だけ`StandDown()`を呼びます。
 - process強制終了、host停止、電源断ではdown動作を保証できません。
 
 ## 状態Key
 
-状態変化をZenoh `put`で配信し、各keyにexact Queryableを宣言します。後から接続
-したclientは`get`で現在値を取得できます。
+状態変化をZenoh `put`で配信し、定期heartbeatとしても再配信し、各keyにexact
+Queryableを宣言します。後から接続したclientは`get`で現在値を取得でき、subscriber
+はnodeのstateがstaleかローカルに判定できます。
 
 | Key | 意味 |
 | --- | --- |
 | `{robot_key}/state/command/requested` | 受信した最後の有効速度。歩行禁止中のcommandも記録 |
-| `{robot_key}/state/command/applied` | SDKへ正常に転送できた最後の速度 |
+| `{robot_key}/state/command/applied` | 現在の指令速度推定値。成功した最後の`Move`で更新し、成功した`StopMove`後にzeroへ戻す |
 | `{robot_key}/state/posture` | `unknown`, `standing_up`, `standing`, `standing_down`, `down` |
 | `{robot_key}/state/health` | node状態と安全flag |
 
 ```json
-{"vx":0.5,"vy":0.0,"vyaw":0.2,"active":true}
+{"vx":0.5,"vy":0.0,"vyaw":0.2}
 ```
 
 ```json
@@ -182,8 +192,8 @@ standing    -- down  --> standing_down -- StandDown ----------> down
 }
 ```
 
-`applied`はSDK callが成功したことを意味し、実機telemetryで確認した物理速度・姿勢
-ではありません。
+`applied`はSDK return codeの成功から推定した値で、実機telemetryで確認した物理
+速度・姿勢ではありません。
 
 ## Pygame操作
 
@@ -198,7 +208,7 @@ Shiftは移動のdeadmanで、姿勢commandにも必要です。
 | `Shift+F` | `StandDown()`で伏せる |
 | `Space` | 即座にゼロ速度をpublish |
 | `Shift`を離す | 即座にゼロ速度をpublish |
-| windowがfocusを失う | ゼロ速度をpublishし、Shiftを一度離すまで再armしない |
+| windowがfocusを失う | ゼロ速度をpublishし、stand再送を取消し、Shiftを一度離すまで移動・姿勢commandを再armしない |
 | `Esc` / windowを閉じる | ゼロ速度をpublishして終了 |
 
 複数軸を同時操作できます。keyboard nodeは設定targetまでrampしながら20 Hzで
@@ -206,7 +216,9 @@ publishし、requested/applied速度、姿勢、walking enable、watchdog、heal
 deadmanを表示します。
 速度はbest-effort/drop QoSです。stand/downは同じcommand key上の別の
 reliable/blocking publisherを使い、報告姿勢がtargetへ到達するか、設定timeoutを
-operator errorとして表示するまで再送します。
+operator errorとして表示するまで再送します。ACKにはrequestより新しいstate sample
+だけを使います。focus喪失、Shift解放、終了では保留`stand`再送を取消します。
+すでに要求した安全側の`down`はkeyboard nodeが動作中なら再送対象に残します。
 
 ## 開発時の検証
 

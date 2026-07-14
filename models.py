@@ -29,9 +29,12 @@ class VelocityCommand(StrictModel):
     vyaw: Vyaw
 
 
+PostureTarget = Literal["stand", "down"]
+
+
 class PostureCommand(StrictModel):
     type: Literal["posture"] = "posture"
-    posture: Literal["stand", "down"]
+    posture: PostureTarget
 
 
 Command = Annotated[VelocityCommand | PostureCommand, Field(discriminator="type")]
@@ -57,18 +60,10 @@ class VelocityState(StrictModel):
     vx: Vx = 0.0
     vy: Vy = 0.0
     vyaw: Vyaw = 0.0
-    active: bool = False
 
     @classmethod
-    def from_command(
-        cls, command: VelocityCommand, *, active: bool = True
-    ) -> "VelocityState":
-        return cls(
-            vx=command.vx,
-            vy=command.vy,
-            vyaw=command.vyaw,
-            active=active,
-        )
+    def from_command(cls, command: VelocityCommand) -> "VelocityState":
+        return cls(vx=command.vx, vy=command.vy, vyaw=command.vyaw)
 
 
 class PostureState(StrictModel):

@@ -24,11 +24,12 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.targets.vx, 0.5)
 
     def test_keyboard_shared_vx_target_honors_reverse_limit(self) -> None:
-        with self.assertRaises(ValidationError):
+        with self.assertRaises(ValidationError) as raised:
             KeyboardConfig.model_validate(
                 {
                     "robot_key": "unitree/go2",
                     "publish_frequency_hz": 20.0,
+                    "state_stale_after_seconds": 2.5,
                     "targets": {"vx": 2.6, "vy": 0.3, "vyaw": 1.0},
                     "ramp_rates": {"vx": 1.0, "vy": 0.8, "vyaw": 2.0},
                     "posture_requests": {
@@ -37,6 +38,11 @@ class ConfigTests(unittest.TestCase):
                     },
                 }
             )
+
+        self.assertIn(
+            ("targets", "vx"),
+            {tuple(error["loc"]) for error in raised.exception.errors()},
+        )
 
     def test_example_zenoh_configs_load(self) -> None:
         for path in (
@@ -52,6 +58,7 @@ class ConfigTests(unittest.TestCase):
             NodeConfig.model_validate(
                 {
                     "robot_key": "unitree/*",
+                    "state_heartbeat_seconds": 1.0,
                     "dds": {
                         "domain_id": 0,
                         "network_interface": "eth0",
@@ -65,23 +72,25 @@ class ConfigTests(unittest.TestCase):
                 }
             )
 
-    def test_rpc_timeout_must_fit_inside_watchdog_interval(self) -> None:
-        with self.assertRaises(ValidationError):
-            NodeConfig.model_validate(
-                {
-                    "robot_key": "unitree/go2",
-                    "dds": {
-                        "domain_id": 0,
-                        "network_interface": "eth0",
-                        "rpc_timeout_seconds": 0.3,
-                    },
-                    "safety": {
-                        "command_timeout_seconds": 0.25,
-                        "posture_transition_seconds": 3.0,
-                        "shutdown_stop_delay_seconds": 1.0,
-                    },
-                }
-            )
+    def test_rpc_timeout_is_not_misrepresented_as_watchdog_deadline(self) -> None:
+        config = NodeConfig.model_validate(
+            {
+                "robot_key": "unitree/go2",
+                "state_heartbeat_seconds": 1.0,
+                "dds": {
+                    "domain_id": 0,
+                    "network_interface": "eth0",
+                    "rpc_timeout_seconds": 0.3,
+                },
+                "safety": {
+                    "command_timeout_seconds": 0.25,
+                    "posture_transition_seconds": 3.0,
+                    "shutdown_stop_delay_seconds": 1.0,
+                },
+            }
+        )
+
+        self.assertEqual(config.dds.rpc_timeout_seconds, 0.3)
 
 
 if __name__ == "__main__":
