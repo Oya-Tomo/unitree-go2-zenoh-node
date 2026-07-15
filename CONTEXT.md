@@ -1,64 +1,48 @@
 # Domain context
 
-This glossary defines the domain language used by the Go2 control node.
-Implementation decisions belong in ADRs, not in this file.
+This glossary defines the small set of terms used by the Go2 control node.
+Implementation decisions belong in ADRs.
 
 ## Robot observation
 
-One `SportModeState` sample received from the Go2, together with its local
-receive sequence and monotonic receive time. Robot observations are the only
-evidence from which a confirmed physical state may be established.
+One `SportModeState` sample together with its local monotonic receive time.
+Robot observations are the only evidence for physical posture and motion.
 
-## Confirmed robot state
+## Physical State
 
-The validity, mode class, motion, and fault facts derived once from a fresh,
-valid window of robot observations. These facts remain separate so, for
-example, a State can report both a fault and non-zero motion. A non-`Unknown`
-physical fact can only be established by observations.
+The validity, mode class, motion, error code, measured velocity, and robot
+timestamp derived from the latest fresh observation. SDK calls and their return
+values never establish physical State.
 
 ## Unknown
 
-An evidence-validity result meaning that the current physical condition cannot
-be confirmed. Missing or stale observations and the period after a discrete
-state-changing command all produce `Unknown`. It is not an estimated posture.
+The physical State used when no fresh valid observation is available or after a
+posture-related SDK call. It is not an estimated posture. Commands are not
+accepted until a newer valid observation replaces it.
 
-## Action request
+## Velocity request
 
-A one-shot operator goal: `Stand`, `Down`, or `Stop`. A request is not a robot
-state. It remains active across the minimum sequence of commands needed to
-reach its State-confirmed target.
+The latest short-lived Zenoh velocity command and its local receive time. It is
+not measured velocity. A newer velocity replaces it.
 
-## Velocity setpoint
+## Posture request
 
-The latest short-lived operator velocity request, including its receive time
-and deadman deadline. It is not an action workflow and is never interpreted as
-the measured robot velocity.
+The latest Zenoh `stand` or `down` target. A newer posture replaces it, and a
+posture request has priority over velocity.
 
-## SDK invocation
+## Posture phase
 
-One SDK call, including its expiring dispatch permit, channel status, and RPC
-correlation. Every command, including `Move`, has an SDK invocation.
+The last SDK step sent for the active posture request. It prevents duplicate
+calls while the node waits for a newer State, but it never represents the
+robot's physical posture.
 
-## Discrete command attempt
+## SDK diagnostic
 
-A `StandUp`, `BalanceStand`, `StopMove`, or `StandDown` invocation together with
-its observation barrier, deadline, and State target. `Move` is not a discrete
-command attempt. The attempt describes synchronization, not physical state.
+The command name, return code, or exception from the latest SDK call. It is
+operator information only and cannot advance a posture workflow.
 
-## RPC diagnostic
+## Published State
 
-The return code, exception, and duration of an SDK call. It may report transport
-availability but never proves command completion or physical state.
-
-## Command channel state
-
-Whether the SDK command boundary is ready, reserved for an unstarted invocation,
-busy, or failed. It controls only
-whether another RPC may start and never changes confirmed robot state or a
-State-confirmed command target.
-
-## Canonical state
-
-One revisioned snapshot containing the confirmed robot state, supporting
-observation, request, setpoint, SDK invocation, discrete attempt, channel state,
-and RPC diagnostic without mixing their meanings.
+One revisioned `{robot_key}/state` snapshot containing physical State, current
+requests, posture phase, lifecycle, and the latest SDK diagnostic without
+mixing their meanings.

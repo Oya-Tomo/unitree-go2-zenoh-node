@@ -17,10 +17,4 @@
     vy: 0.8,
     vyaw: 2.0,
   },
-
-  // Reliable posture commands are retried until the node reports the target.
-  posture_requests: {
-    retry_interval_seconds: 0.5,
-    timeout_seconds: 10.0,
-  },
 }
