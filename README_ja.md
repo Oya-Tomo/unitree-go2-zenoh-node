@@ -27,7 +27,7 @@ loopの実行順序は常に同じです。
 4. 最大1回だけSDKを呼ぶ
 
 Zenoh callbackはSDKを呼びません。中心となる実装は、processとI/Oを構成する
-`node.py`、Stateと制御方針を持つ`controller.py`、設定だけを持つ`settings.py`の
+`node.py`、Stateと制御方針を持つ`controller.py`、設定だけを持つ`config.py`の
 3ファイルです。詳細は
 [ADR-0001](docs/adr/0001-observed-state-driven-control-architecture.md)にあります。
 

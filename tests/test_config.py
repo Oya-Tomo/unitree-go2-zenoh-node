@@ -5,12 +5,12 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from settings import NodeConfig, load_keyboard_config, load_node_config
+from config import NodeConfig, load_keyboard_config, load_node_config
 
 ROOT = Path(__file__).parents[1]
 
 
-class SettingsTests(unittest.TestCase):
+class ConfigTests(unittest.TestCase):
     def test_example_configs_load(self) -> None:
         node = load_node_config(ROOT / "config/node-config.example.json5")
         keyboard = load_keyboard_config(ROOT / "examples/keyboard-config.example.json5")

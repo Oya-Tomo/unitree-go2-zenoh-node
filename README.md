@@ -28,7 +28,7 @@ The loop always performs the same sequence:
 
 Zenoh receipt alone never calls the SDK. The core implementation has only three
 files: `node.py` for process and I/O wiring, `controller.py` for State and
-control policy, and `settings.py` for configuration. See
+control policy, and `config.py` for configuration. See
 [ADR-0001](docs/adr/0001-observed-state-driven-control-architecture.md).
 
 ## Install

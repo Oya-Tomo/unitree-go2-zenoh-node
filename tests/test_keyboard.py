@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 
+from config import load_keyboard_config
 from controller import PostureTarget
 from examples.keyboard import (
     ZERO_VELOCITY,
@@ -12,7 +13,6 @@ from examples.keyboard import (
     approach,
     ramp_velocity,
 )
-from settings import load_keyboard_config
 
 ROOT = Path(__file__).parents[1]
 

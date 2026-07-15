@@ -11,8 +11,8 @@ from typing import Protocol
 import pygame
 from pydantic import ValidationError
 
+from config import KeyboardConfig
 from controller import Keyspace, NodeState
-from settings import KeyboardConfig
 
 WINDOW_SIZE = (920, 620)
 BACKGROUND = (20, 23, 28)

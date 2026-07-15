@@ -17,6 +17,7 @@ from typing import Any, Protocol
 import zenoh
 from pydantic import ValidationError
 
+from config import NodeConfig, load_node_config
 from controller import (
     JSON_ENCODING,
     CommandBuffer,
@@ -29,7 +30,6 @@ from controller import (
     VelocityCommand,
     decode_command,
 )
-from settings import NodeConfig, load_node_config
 
 DEFAULT_NODE_CONFIG_PATH = Path("config/node-config.json5")
 DEFAULT_ZENOH_CONFIG_PATH = Path("config/zenoh-config.json5")

@@ -15,6 +15,7 @@ import pygame
 import zenoh
 from pydantic import ValidationError
 
+from config import KeyboardConfig, load_keyboard_config
 from controller import (
     JSON_ENCODING,
     Keyspace,
@@ -23,7 +24,6 @@ from controller import (
     VelocityCommand,
 )
 from examples.keyboard_dashboard import Dashboard, RobotStateCache
-from settings import KeyboardConfig, load_keyboard_config
 
 DEFAULT_KEYBOARD_CONFIG_PATH = Path("examples/keyboard-config.json5")
 DEFAULT_ZENOH_CONFIG_PATH = Path("examples/keyboard-zenoh-config.json5")

@@ -163,7 +163,7 @@ The production implementation is intentionally limited to three Python files:
 ```text
 node.py        process lifecycle, DDS/Zenoh adapters, State-triggered loop
 controller.py State classification, latest buffers, policy, SDK serialization
-settings.py    validated node and keyboard configuration
+config.py      validated node and keyboard configuration
 ```
 
 The keyboard UI remains under `examples/`. It publishes only the existing
