@@ -74,6 +74,9 @@ stale after `state_stale_after_seconds` without a new heartbeat.
 `dds.sport_mode_state_topic` selects the raw DDS `SportModeState` topic. The
 default is `rt/sportmodestate`; some firmware layouts use an `lf`-prefixed
 topic, so configure the topic actually published by the robot.
+`dds.sport_mode_state_startup_timeout_seconds` bounds the initial wait for the
+first sample before the startup safety decision. If it expires, startup keeps
+the fail-safe behavior and calls `StopMove()` with motion state unavailable.
 `safety.motion_state_max_age_seconds` is the maximum trusted local sample age.
 `safety.balance_confirmation_timeout_seconds` bounds the wait for a new sample
 after `BalanceStand()`. Missing, older, errored, or contradictory telemetry

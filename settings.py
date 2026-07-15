@@ -44,6 +44,7 @@ class DdsConfig(ConfigModel):
     network_interface: StrictStr
     rpc_timeout_seconds: PositiveFiniteFloat
     sport_mode_state_topic: StrictStr = "rt/sportmodestate"
+    sport_mode_state_startup_timeout_seconds: PositiveFiniteFloat = 1.0
 
     @field_validator("network_interface", "sport_mode_state_topic")
     @classmethod

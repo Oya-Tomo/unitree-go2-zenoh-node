@@ -7,8 +7,8 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import IntEnum, StrEnum
-from threading import Lock
-from typing import Protocol
+from threading import Condition
+from typing import Protocol, cast
 
 from models import MotionTelemetryState
 
@@ -56,6 +56,17 @@ class MotionStateObservation:
 
 class MotionStateSource(Protocol):
     def snapshot(self) -> MotionStateObservation | None: ...
+
+
+class SportModeStateLike(Protocol):
+    mode: int
+    error_code: int
+
+
+class SportModeSubscriber(Protocol):
+    def Init(self, handler: Callable[[SportModeStateLike], None]) -> None: ...
+
+    def Close(self) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -307,7 +318,7 @@ class MotionStateCache:
     def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
         self._observation: MotionStateObservation | None = None
-        self._lock = Lock()
+        self._condition = Condition()
 
     def update(self, *, mode: int, error_code: int) -> None:
         observation = MotionStateObservation(
@@ -315,12 +326,21 @@ class MotionStateCache:
             error_code=error_code,
             received_at=self._clock(),
         )
-        with self._lock:
+        with self._condition:
             self._observation = observation
+            self._condition.notify_all()
 
     def snapshot(self) -> MotionStateObservation | None:
-        with self._lock:
+        with self._condition:
             return self._observation
+
+    def wait_for_first_observation(self, *, timeout: float) -> bool:
+        """Wait until DDS has delivered at least one locally timestamped sample."""
+        with self._condition:
+            return self._condition.wait_for(
+                lambda: self._observation is not None,
+                timeout=timeout,
+            )
 
 
 class MotionStateMonitor:
@@ -360,18 +380,36 @@ class MotionStateMonitor:
 def subscribe_sport_mode(
     topic: str,
     cache: MotionStateCache,
+    *,
+    initial_state_timeout_seconds: float,
+    subscriber_factory: Callable[[str], SportModeSubscriber] | None = None,
 ) -> Iterator[None]:
     """Feed a cache from the Go2 DDS SportModeState topic."""
-    from unitree_sdk2py.core.channel import ChannelSubscriber
-    from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
+    if subscriber_factory is None:
+        from unitree_sdk2py.core.channel import ChannelSubscriber
+        from unitree_sdk2py.idl.unitree_go.msg.dds_ import SportModeState_
 
-    subscriber = ChannelSubscriber(topic, SportModeState_)
+        subscriber = cast(
+            SportModeSubscriber,
+            ChannelSubscriber(topic, SportModeState_),
+        )
+    else:
+        subscriber = subscriber_factory(topic)
 
-    def update_cache(state: SportModeState_) -> None:
+    def update_cache(state: SportModeStateLike) -> None:
         cache.update(mode=int(state.mode), error_code=int(state.error_code))
 
     try:
         subscriber.Init(update_cache)
+        if not cache.wait_for_first_observation(
+            timeout=initial_state_timeout_seconds,
+        ):
+            LOGGER.warning(
+                "No SportModeState sample received on %s within %.3f seconds; "
+                "startup will use the fail-safe StopMove path",
+                topic,
+                initial_state_timeout_seconds,
+            )
         yield
     finally:
         subscriber.Close()

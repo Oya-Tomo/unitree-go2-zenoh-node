@@ -11,6 +11,8 @@
     rpc_timeout_seconds: 0.2,
     // High-frequency physical/FSM state used to confirm the robot is already down.
     sport_mode_state_topic: "rt/sportmodestate",
+    // Wait for the first state sample before the startup safety decision.
+    sport_mode_state_startup_timeout_seconds: 1.0,
   },
 
   safety: {

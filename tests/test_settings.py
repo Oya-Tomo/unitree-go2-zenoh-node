@@ -19,6 +19,10 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.safety.motion_state_max_age_seconds, 0.5)
         self.assertEqual(config.safety.balance_confirmation_timeout_seconds, 1.0)
         self.assertEqual(config.dds.sport_mode_state_topic, "rt/sportmodestate")
+        self.assertEqual(
+            config.dds.sport_mode_state_startup_timeout_seconds,
+            1.0,
+        )
 
     def test_example_keyboard_config_loads(self) -> None:
         config = load_keyboard_config(Path("examples/keyboard-config.example.json5"))

@@ -193,7 +193,13 @@ def run(
     motion_cache = MotionStateCache()
     source = motion_state_source if motion_state_source is not None else motion_cache
     motion_subscription = (
-        subscribe_sport_mode(node_config.dds.sport_mode_state_topic, motion_cache)
+        subscribe_sport_mode(
+            node_config.dds.sport_mode_state_topic,
+            motion_cache,
+            initial_state_timeout_seconds=(
+                node_config.dds.sport_mode_state_startup_timeout_seconds
+            ),
+        )
         if owns_sport_client and motion_state_source is None
         else nullcontext()
     )

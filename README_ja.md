@@ -73,7 +73,10 @@ command publisherの`robot_key`は一致させます。例は`unitree/go2`です
 
 `dds.sport_mode_state_topic`はraw DDSの`SportModeState` topicです。既定値は
 `rt/sportmodestate`ですが、firmware構成によっては`lf`付きtopicを使うため、実機が
-publishするtopicへ合わせてください。`safety.motion_state_max_age_seconds`はsampleを
+publishするtopicへ合わせてください。
+`dds.sport_mode_state_startup_timeout_seconds`は起動時の安全判定前に最初のsampleを
+待つ期限です。期限内に届かなければ、motion未受信として安全側の`StopMove()`を
+呼びます。`safety.motion_state_max_age_seconds`はsampleを
 信頼できる最大経過時間、`safety.balance_confirmation_timeout_seconds`は
 `BalanceStand()`後に新しいsampleを待つ期限です。古いsample、未受信、error付き、
 矛盾する状態では`StopMove()`を省略せず、歩行も有効化しません。
