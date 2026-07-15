@@ -7,7 +7,7 @@ import logging
 import signal
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from threading import Event, Lock
 from types import FrameType
@@ -24,7 +24,13 @@ from controller import (
     StateSink,
 )
 from keyspace import RobotKeyspace
-from models import HealthState, PostureState, VelocityState
+from models import (
+    HealthState,
+    MotionTelemetryState,
+    PostureState,
+    VelocityState,
+)
+from motion_state import MotionStateCache, MotionStateSource, subscribe_sport_mode
 from settings import NodeConfig, load_node_config
 
 DEFAULT_NODE_CONFIG_PATH = Path("config/node-config.json5")
@@ -63,6 +69,7 @@ class ZenohStateBus(StateSink):
             "requested": keyspace.requested_velocity,
             "applied": keyspace.applied_velocity,
             "posture": keyspace.posture,
+            "motion": keyspace.motion,
             "health": keyspace.health,
         }
         self._payloads: dict[str, str] = {}
@@ -104,6 +111,9 @@ class ZenohStateBus(StateSink):
 
     def publish_posture(self, state: PostureState) -> None:
         self._publish("posture", state)
+
+    def publish_motion(self, state: MotionTelemetryState) -> None:
+        self._publish("motion", state)
 
     def publish_health(self, state: HealthState) -> None:
         self._publish("health", state)
@@ -163,6 +173,7 @@ def run(
     node_config: NodeConfig,
     *,
     sport_client: SportClientProtocol | None = None,
+    motion_state_source: MotionStateSource | None = None,
 ) -> None:
     zenoh.init_log_from_env_or("error")
     keyspace = RobotKeyspace(node_config.robot_key)
@@ -175,27 +186,39 @@ def run(
             received_at=time.monotonic(),
         )
 
+    owns_sport_client = sport_client is None
     client = (
         sport_client if sport_client is not None else create_sport_client(node_config)
+    )
+    motion_cache = MotionStateCache()
+    source = motion_state_source if motion_state_source is not None else motion_cache
+    motion_subscription = (
+        subscribe_sport_mode(node_config.dds.sport_mode_state_topic, motion_cache)
+        if owns_sport_client and motion_state_source is None
+        else nullcontext()
     )
     with (
         zenoh.open(zenoh_config) as session,
         ZenohStateBus(session, node_config.robot_key) as state_bus,
         session.declare_subscriber(keyspace.command, on_command),
+        motion_subscription,
         stop_on_signals(stop_event),
     ):
         controller = RobotController(
             client,
             state_bus,
             ControllerTiming(
-                command_timeout_seconds=(node_config.safety.command_timeout_seconds),
-                posture_transition_seconds=(
-                    node_config.safety.posture_transition_seconds
+                command_timeout_seconds=node_config.safety.command_timeout_seconds,
+                posture_transition_seconds=node_config.safety.posture_transition_seconds,
+                shutdown_stop_delay_seconds=node_config.safety.shutdown_stop_delay_seconds,
+                motion_state_max_age_seconds=(
+                    node_config.safety.motion_state_max_age_seconds
                 ),
-                shutdown_stop_delay_seconds=(
-                    node_config.safety.shutdown_stop_delay_seconds
+                balance_confirmation_timeout_seconds=(
+                    node_config.safety.balance_confirmation_timeout_seconds
                 ),
             ),
+            motion_state_source=source,
         )
         LOGGER.info("Listening for commands on %s", keyspace.command)
         controller.startup()

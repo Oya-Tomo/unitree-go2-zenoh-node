@@ -16,6 +16,9 @@ class ConfigTests(unittest.TestCase):
 
         self.assertEqual(config.robot_key, "unitree/go2")
         self.assertEqual(config.safety.command_timeout_seconds, 0.25)
+        self.assertEqual(config.safety.motion_state_max_age_seconds, 0.5)
+        self.assertEqual(config.safety.balance_confirmation_timeout_seconds, 1.0)
+        self.assertEqual(config.dds.sport_mode_state_topic, "rt/sportmodestate")
 
     def test_example_keyboard_config_loads(self) -> None:
         config = load_keyboard_config(Path("examples/keyboard-config.example.json5"))
@@ -91,6 +94,26 @@ class ConfigTests(unittest.TestCase):
         )
 
         self.assertEqual(config.dds.rpc_timeout_seconds, 0.3)
+
+    def test_sport_mode_state_topic_must_be_non_empty(self) -> None:
+        with self.assertRaises(ValidationError):
+            NodeConfig.model_validate(
+                {
+                    "robot_key": "unitree/go2",
+                    "state_heartbeat_seconds": 1.0,
+                    "dds": {
+                        "domain_id": 0,
+                        "network_interface": "eth0",
+                        "rpc_timeout_seconds": 0.3,
+                        "sport_mode_state_topic": " ",
+                    },
+                    "safety": {
+                        "command_timeout_seconds": 0.25,
+                        "posture_transition_seconds": 3.0,
+                        "shutdown_stop_delay_seconds": 1.0,
+                    },
+                }
+            )
 
 
 if __name__ == "__main__":

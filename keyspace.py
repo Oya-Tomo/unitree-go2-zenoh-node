@@ -26,6 +26,10 @@ class RobotKeyspace:
         return f"{self.robot_key}/state/posture"
 
     @property
+    def motion(self) -> str:
+        return f"{self.robot_key}/state/motion"
+
+    @property
     def health(self) -> str:
         return f"{self.robot_key}/state/health"
 
@@ -34,10 +38,11 @@ class RobotKeyspace:
         return f"{self.robot_key}/state/**"
 
     @property
-    def state_keys(self) -> tuple[str, str, str, str]:
+    def state_keys(self) -> tuple[str, str, str, str, str]:
         return (
             self.requested_velocity,
             self.applied_velocity,
             self.posture,
+            self.motion,
             self.health,
         )

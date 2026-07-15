@@ -10,6 +10,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StrictStr,
+    ValidationInfo,
     field_validator,
     model_validator,
 )
@@ -42,12 +43,13 @@ class DdsConfig(ConfigModel):
     domain_id: NonNegativeInt
     network_interface: StrictStr
     rpc_timeout_seconds: PositiveFiniteFloat
+    sport_mode_state_topic: StrictStr = "rt/sportmodestate"
 
-    @field_validator("network_interface")
+    @field_validator("network_interface", "sport_mode_state_topic")
     @classmethod
-    def validate_network_interface(cls, value: str) -> str:
+    def validate_non_empty_string(cls, value: str, info: ValidationInfo) -> str:
         if not value.strip():
-            raise ValueError("network_interface must be a non-empty string")
+            raise ValueError(f"{info.field_name} must be a non-empty string")
         return value
 
 
@@ -55,6 +57,8 @@ class SafetyConfig(ConfigModel):
     command_timeout_seconds: PositiveFiniteFloat
     posture_transition_seconds: PositiveFiniteFloat
     shutdown_stop_delay_seconds: PositiveFiniteFloat
+    motion_state_max_age_seconds: PositiveFiniteFloat = 0.5
+    balance_confirmation_timeout_seconds: PositiveFiniteFloat = 1.0
 
 
 class NodeConfig(ConfigModel):

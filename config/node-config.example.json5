@@ -9,11 +9,17 @@
     network_interface: "enp2s0",
     // Bounds each SDK request phase; synchronous calls still block the control loop.
     rpc_timeout_seconds: 0.2,
+    // High-frequency physical/FSM state used to confirm the robot is already down.
+    sport_mode_state_topic: "rt/sportmodestate",
   },
 
   safety: {
     command_timeout_seconds: 0.25,
     posture_transition_seconds: 3.0,
     shutdown_stop_delay_seconds: 1.0,
+    // Older motion samples are not trusted for safety decisions.
+    motion_state_max_age_seconds: 0.5,
+    // Keep walking disabled while waiting for post-BalanceStand telemetry.
+    balance_confirmation_timeout_seconds: 1.0,
   },
 }

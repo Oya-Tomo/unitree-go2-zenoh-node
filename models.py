@@ -70,6 +70,13 @@ class PostureState(StrictModel):
     posture: Posture = Posture.UNKNOWN
 
 
+class MotionTelemetryState(StrictModel):
+    mode: int | None = None
+    mode_name: str | None = None
+    error_code: int | None = None
+    fresh: bool = False
+
+
 class HealthState(StrictModel):
     status: NodeStatus = NodeStatus.STARTING
     walking_enabled: bool = False

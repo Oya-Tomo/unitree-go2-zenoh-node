@@ -9,7 +9,7 @@ from examples.keyboard_io import ObservedState, RobotStateCache
 from models import VelocityState
 from settings import KeyboardConfig
 
-WINDOW_SIZE = (900, 520)
+WINDOW_SIZE = (900, 560)
 BACKGROUND = (20, 23, 28)
 FOREGROUND = (232, 236, 241)
 ACCENT = (86, 182, 194)
@@ -54,6 +54,7 @@ class Dashboard:
         requested = states.get(keys.requested_velocity)
         applied = states.get(keys.applied_velocity)
         posture_state = states.get(keys.posture)
+        motion_state = states.get(keys.motion)
         health_state = states.get(keys.health)
         posture_stale = posture_state is None or posture_state.is_stale(
             now=now, maximum_age=self._config.state_stale_after_seconds
@@ -61,6 +62,18 @@ class Dashboard:
         posture = "stale"
         if not posture_stale and posture_state is not None:
             posture = posture_state.value.get("posture", "invalid")
+        motion_stale = motion_state is None or motion_state.is_stale(
+            now=now, maximum_age=self._config.state_stale_after_seconds
+        )
+        motion = motion_state.value if motion_state is not None else {}
+        motion_summary = "stale"
+        if not motion_stale:
+            motion_summary = (
+                f"{motion.get('mode_name', 'unknown')} "
+                f"(mode={motion.get('mode', 'unknown')}, "
+                f"error={motion.get('error_code', 'unknown')}, "
+                f"fresh={motion.get('fresh', False)})"
+            )
         health = health_state.value if health_state is not None else {}
         health_stale = health_state is None or health_state.is_stale(
             now=now, maximum_age=self._config.state_stale_after_seconds
@@ -92,6 +105,13 @@ class Dashboard:
                 FOREGROUND,
             ),
             (self._small_font, f"Posture: {posture}", FOREGROUND),
+            (
+                self._small_font,
+                f"Observed motion: {motion_summary}",
+                WARNING
+                if motion_stale or not motion.get("fresh", False)
+                else FOREGROUND,
+            ),
             (
                 self._small_font,
                 "Health: "

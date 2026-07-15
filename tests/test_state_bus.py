@@ -5,7 +5,13 @@ import unittest
 from contextlib import AbstractContextManager
 from typing import Any
 
-from models import HealthState, Posture, PostureState, VelocityState
+from models import (
+    HealthState,
+    MotionTelemetryState,
+    Posture,
+    PostureState,
+    VelocityState,
+)
 from node import ZenohStateBus
 
 
@@ -53,12 +59,21 @@ class ZenohStateBusTests(unittest.TestCase):
             bus.publish_requested(VelocityState(vx=0.5, vy=0.0, vyaw=0.0))
             bus.publish_applied(VelocityState())
             bus.publish_posture(PostureState(posture=Posture.DOWN))
+            bus.publish_motion(
+                MotionTelemetryState(
+                    mode=5,
+                    mode_name="lie_down",
+                    error_code=0,
+                    fresh=True,
+                )
+            )
             bus.publish_health(HealthState())
 
             expected_keys = {
                 "unitree/go2/state/command/requested",
                 "unitree/go2/state/command/applied",
                 "unitree/go2/state/posture",
+                "unitree/go2/state/motion",
                 "unitree/go2/state/health",
             }
             self.assertEqual(set(session.queryables), expected_keys)
