@@ -1,0 +1,16 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local runtime configuration
+config/node-config.json5
+config/zenoh-config.json5
+examples/keyboard-config.json5
+examples/keyboard-zenoh-config.json5

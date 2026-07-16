@@ -1,0 +1,20 @@
+{
+  robot_key: "unitree/go2",
+  publish_frequency_hz: 20.0,
+  // Mark the dashboard stale if state heartbeats stop arriving.
+  state_stale_after_seconds: 2.5,
+
+  // Conservative operator targets, not the SDK validation limits.
+  targets: {
+    vx: 0.5,
+    vy: 0.3,
+    vyaw: 1.0,
+  },
+
+  // Maximum change per second for the keyboard-generated command.
+  ramp_rates: {
+    vx: 1.0,
+    vy: 0.8,
+    vyaw: 2.0,
+  },
+}
