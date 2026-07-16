@@ -166,7 +166,13 @@ class ControllerTests(unittest.TestCase):
                 physical.DOWN,
             ),
             ("moving crouch", fsm.CROUCH, sport.LIE_DOWN, 0.1, physical.TRANSITION),
-            ("standing lock", fsm.STANDING_LOCK, sport.IDLE, 0.0, physical.IDLE_STAND),
+            (
+                "standing lock",
+                fsm.STANDING_LOCK,
+                sport.IDLE,
+                0.0,
+                physical.LOCKED_STAND,
+            ),
             (
                 "moving standing lock",
                 fsm.STANDING_LOCK,
@@ -202,7 +208,7 @@ class ControllerTests(unittest.TestCase):
                 0.0,
                 physical.TRANSITION,
             ),
-            ("agile idle", fsm.AGILE, sport.IDLE, 0.0, physical.IDLE_STAND),
+            ("agile idle", fsm.AGILE, sport.IDLE, 0.0, physical.READY_STAND),
             ("agile ready", fsm.AGILE, sport.BALANCE_STAND, 0.0, physical.READY_STAND),
             ("agile locomotion", fsm.AGILE, sport.LOCOMOTION, 0.1, physical.LOCOMOTION),
             (
@@ -254,7 +260,7 @@ class ControllerTests(unittest.TestCase):
                 )
                 self.assertEqual(state.state_machine_code, state_machine)
 
-    def test_agile_idle_startup_accepts_stand(self) -> None:
+    def test_agile_idle_accepts_velocity_without_an_internal_walking_flag(self) -> None:
         harness = Harness()
 
         harness.state(
@@ -264,30 +270,28 @@ class ControllerTests(unittest.TestCase):
 
         state = harness.states.states[-1]
         self.assertEqual(state.lifecycle, Lifecycle.RUNNING)
-        self.assertEqual(state.robot.mode_class, ModeClass.IDLE_STAND)
+        self.assertEqual(state.robot.mode_class, ModeClass.READY_STAND)
         self.assertEqual(state.robot.state_machine_code, 100)
         self.assertEqual(state.robot.state_machine_name, "agile")
         self.assertTrue(state.accepting_posture)
-        self.assertFalse(state.accepting_velocity)
+        self.assertTrue(state.accepting_velocity)
 
         self.assertTrue(harness.posture("stand"))
         harness.next_state(
             Go2SportMode.IDLE,
             state_machine_code=Go2MotionStateMachine.AGILE,
         )
-        self.assertEqual(harness.client.calls, [("BalanceStand",)])
-        self.assertEqual(
-            harness.states.states[-1].robot.validity,
-            StateValidity.UNKNOWN,
-        )
-
-        harness.next_state(
-            Go2SportMode.BALANCE_STAND,
-            state_machine_code=Go2MotionStateMachine.BALANCE_STANDING,
-        )
+        self.assertEqual(harness.client.calls, [])
         self.assertIsNone(harness.states.states[-1].requested_posture)
         self.assertTrue(harness.states.states[-1].accepting_posture)
         self.assertTrue(harness.states.states[-1].accepting_velocity)
+
+        self.assertTrue(harness.velocity(0.5))
+        harness.next_state(
+            Go2SportMode.IDLE,
+            state_machine_code=Go2MotionStateMachine.AGILE,
+        )
+        self.assertEqual(harness.client.calls, [("Move", 0.5, 0.0, 0.0)])
 
     def test_unrecognized_state_machine_rejects_input(self) -> None:
         harness = Harness()

@@ -110,9 +110,9 @@ V2.0ではDDS field名`error_code`は現在のmotion state machine IDです。no
 
 | State machine ID | Name | nodeでの扱い |
 | --- | --- | --- |
-| 100 | Agile | quiescentなmode 0/1、またはmode 3 |
+| 100 | Agile | quiescentなmode 0/1はready stand、mode 3はlocomotion |
 | 1001 | Damping | mode 0。姿勢は不明のまま |
-| 1002 | Standing Lock | quiescentなmode 0 |
+| 1002 | Standing Lock | quiescentなmode 0はlocked stand |
 | 1013 | Balance Standing | quiescentなmode 1、またはmode 3 |
 | 1004 / 2006 | Crouch | mode 5かつquiescentならdown |
 
@@ -123,6 +123,11 @@ quiescentなDampingでは、転倒または伏せ姿勢からの復帰用とし�
 `RecoveryStand()`をStand requestに使用できます。V2.0仕様では、転倒の有無にかかわらず
 立位へ復帰するcommandと明記されています。
 
+coarse modeだけではcommand能力を決めません。今回の実機では`BalanceStand()`がzeroを返した
+後も、立位のStateは`100` Agile / mode 0のままでした。そのためAgile mode 0は`Move`を
+受け付けるready stand、同じmode 0でも`1002` Standing Lockは`BalanceStand`が必要な
+locked standとして分類します。RPC resultや内部walking flagでは区別しません。
+
 commandの受付可否とSDK実行可否は、どちらも実機Stateから決定します。
 
 | 実機State | 姿勢入力 | 速度入力 | Stand request | Down request | Velocity |
@@ -130,7 +135,7 @@ commandの受付可否とSDK実行可否は、どちらも実機Stateから決�
 | Damping、moving | 受付 | 拒否 | 待機 | 待機 | 待機 |
 | Damping、quiescent | 受付 | 拒否 | `RecoveryStand` | 待機 | 待機 |
 | Down | 受付 | 拒否 | `StandUp` | 完了 | 待機 |
-| Idle stand | 受付 | 拒否 | `BalanceStand` | Stop後に`StandDown` | 待機 |
+| Locked stand | 受付 | 拒否 | `BalanceStand` | Stop後に`StandDown` | 待機 |
 | Ready stand | 受付 | 受付 | 完了 | Stop後に`StandDown` | `Move` |
 | Locomotion | 受付 | 受付 | `BalanceStand` | Stop後に`StandDown` | `Move` |
 | Transition、unsupported、Unknown | 拒否 | 拒否 | 待機 | 待機 | 待機 |
@@ -145,8 +150,8 @@ command受付は上表の姿勢・速度ごとのState policyに従います。
 Downは次の固定workflowです。
 
 ```text
-idle/ready/locomotion State -> StopMoveを1回 -> 新しいquiescent State
-                            -> StandDown -> 新しいdown State -> 完了
+locked/ready/locomotion State -> StopMoveを1回 -> 新しいquiescent State
+                              -> StandDown -> 新しいdown State -> 完了
 ```
 
 `StopMove()`は起動時、Stand、zero速度では使いません。`-1`でも再試行しません。

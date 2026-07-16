@@ -114,9 +114,9 @@ Agile. The controller currently acts only on these state machines:
 
 | State machine ID | Name | Use in this node |
 | --- | --- | --- |
-| 100 | Agile | quiescent mode 0/1, or mode 3 |
+| 100 | Agile | quiescent mode 0/1 is ready stand; mode 3 is locomotion |
 | 1001 | Damping | mode 0; posture remains unknown |
-| 1002 | Standing Lock | quiescent mode 0 |
+| 1002 | Standing Lock | quiescent mode 0 is locked stand |
 | 1013 | Balance Standing | quiescent mode 1, or mode 3 |
 | 1004 / 2006 | Crouch | down when mode 5 is quiescent |
 
@@ -128,6 +128,13 @@ official `RecoveryStand()` operation, which is defined for fallen or crouched
 robots and, according to the V2.0 interface, recovers to standing regardless of
 whether the robot has fallen.
 
+The coarse mode does not determine command capability by itself. In the target
+trace, `BalanceStand()` returned zero and the standing robot continued to
+report `100` Agile with mode 0. Agile mode 0 is therefore a State-confirmed
+ready stand that can accept `Move`; `1002` Standing Lock with the same mode 0
+must first receive `BalanceStand`. No RPC result or internal walking flag is
+used to distinguish them.
+
 Input eligibility and SDK authorization are both derived from physical State:
 
 | Robot State | Posture input | Velocity input | Stand request | Down request | Velocity |
@@ -135,7 +142,7 @@ Input eligibility and SDK authorization are both derived from physical State:
 | Damping, moving | accept | reject | wait | wait | wait |
 | Damping, quiescent | accept | reject | `RecoveryStand` | wait | wait |
 | Down | accept | reject | `StandUp` | complete | wait |
-| Idle stand | accept | reject | `BalanceStand` | Stop then `StandDown` | wait |
+| Locked stand | accept | reject | `BalanceStand` | Stop then `StandDown` | wait |
 | Ready stand | accept | accept | complete | Stop then `StandDown` | `Move` |
 | Locomotion | accept | accept | `BalanceStand` | Stop then `StandDown` | `Move` |
 | Transition, unsupported, Unknown | reject | reject | wait | wait | wait |
@@ -152,8 +159,8 @@ and velocity rules above.
 Down is a fixed State-driven workflow:
 
 ```text
-idle/ready/locomotion State -> StopMove once -> newer quiescent
-                            -> StandDown -> newer down State -> complete
+locked/ready/locomotion State -> StopMove once -> newer quiescent
+                              -> StandDown -> newer down State -> complete
 ```
 
 `StopMove()` is not used at startup, for stand, or for zero velocity. A `-1`

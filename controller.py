@@ -79,7 +79,7 @@ class PostureTarget(StrEnum):
 class ModeClass(StrEnum):
     DOWN = "down"
     DAMPING = "damping"
-    IDLE_STAND = "idle_stand"
+    LOCKED_STAND = "locked_stand"
     READY_STAND = "ready_stand"
     LOCOMOTION = "locomotion"
     TRANSITION = "transition"
@@ -211,7 +211,7 @@ class PhysicalState(BaseModel):
         return self.validity is StateValidity.CONFIRMED and self.mode_class in {
             ModeClass.DOWN,
             ModeClass.DAMPING,
-            ModeClass.IDLE_STAND,
+            ModeClass.LOCKED_STAND,
             ModeClass.READY_STAND,
             ModeClass.LOCOMOTION,
         }
@@ -276,7 +276,7 @@ def classify_state(
         )
     elif state_machine == Go2MotionStateMachine.STANDING_LOCK:
         mode_class = (
-            ModeClass.IDLE_STAND
+            ModeClass.LOCKED_STAND
             if observation.mode == Go2SportMode.IDLE and motion is Motion.QUIESCENT
             else ModeClass.TRANSITION
         )
@@ -291,10 +291,8 @@ def classify_state(
         else:
             mode_class = ModeClass.TRANSITION
     elif state_machine == Go2MotionStateMachine.AGILE:
-        if observation.mode == Go2SportMode.IDLE and motion is Motion.QUIESCENT:
-            mode_class = ModeClass.IDLE_STAND
-        elif (
-            observation.mode == Go2SportMode.BALANCE_STAND
+        if (
+            observation.mode in {Go2SportMode.IDLE, Go2SportMode.BALANCE_STAND}
             and motion is Motion.QUIESCENT
         ):
             mode_class = ModeClass.READY_STAND
@@ -703,7 +701,7 @@ class Controller:
                     )
                 return False
             if (
-                state.mode_class in {ModeClass.IDLE_STAND, ModeClass.LOCOMOTION}
+                state.mode_class in {ModeClass.LOCKED_STAND, ModeClass.LOCOMOTION}
                 and self._posture_phase is not PosturePhase.BALANCE_STAND_SENT
             ):
                 self._dispatch_posture(
@@ -716,7 +714,7 @@ class Controller:
             return True
         if self._posture_phase is None:
             if state.mode_class in {
-                ModeClass.IDLE_STAND,
+                ModeClass.LOCKED_STAND,
                 ModeClass.READY_STAND,
                 ModeClass.LOCOMOTION,
             }:
@@ -728,7 +726,7 @@ class Controller:
             self._posture_phase is PosturePhase.STOP_SENT
             and state.motion is Motion.QUIESCENT
             and state.mode_class
-            in {ModeClass.IDLE_STAND, ModeClass.READY_STAND, ModeClass.LOCOMOTION}
+            in {ModeClass.LOCKED_STAND, ModeClass.READY_STAND, ModeClass.LOCOMOTION}
         ):
             self._dispatch_posture(
                 SdkCommand.STAND_DOWN,

@@ -14,7 +14,8 @@ The validity, V2.0 motion state machine, coarse mode class, measured motion, and
 robot timestamp derived from the latest fresh observation. The SDK field named
 `error_code` carries the motion state machine ID; SDK call return codes are a
 separate diagnostic channel. SDK calls and their return values never establish
-physical State.
+physical State. Command capability is classified from the motion state machine
+and coarse mode together; coarse mode alone is not authoritative.
 
 ## Unknown
 

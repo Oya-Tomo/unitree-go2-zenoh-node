@@ -32,6 +32,14 @@ a newer Stand request from entering the buffer even though Unitree defines
 `RecoveryStand()` for recovery from a fallen or crouched robot and explicitly
 states that it recovers to standing regardless of whether the robot has fallen.
 
+The next hardware trace showed a successful stand workflow but rejected all
+velocity input. After `BalanceStand()` returned zero, the robot remained
+physically standing and continued to publish `100` Agile with coarse mode 0.
+The classifier had collapsed that State and `1002` Standing Lock with mode 0
+into one idle-stand class. It therefore discarded the state-machine distinction
+that determines whether `Move()` can be sent. The RPC result still cannot be
+used as a walking flag; the observed Agile State must carry that capability.
+
 The implementation must also remain small enough that command ordering and all
 safety branches can be read directly from the control loop.
 
@@ -77,11 +85,10 @@ state machines used by this controller:
 
 | State machine ID | State machine | Coarse mode | Physical class |
 | --- | --- | --- | --- |
-| 100 | Agile | 0 and quiescent | idle stand |
-| 100 | Agile | 1 and quiescent | ready stand |
+| 100 | Agile | 0 or 1 and quiescent | ready stand |
 | 100 | Agile | 3 | locomotion |
 | 1001 | Damping | 0 | damping, with measured motion retained |
-| 1002 | Standing Lock | 0 and quiescent | idle stand |
+| 1002 | Standing Lock | 0 and quiescent | locked stand |
 | 1013 | Balance Standing | 1 and quiescent | ready stand |
 | 1013 | Balance Standing | 3 | locomotion |
 | 1004 or 2006 | Crouch | 5 and quiescent | down |
@@ -92,6 +99,12 @@ being relabeled as Crouch or Down; neither its moving nor quiescent form proves
 posture. Other state machines, including special actions, are unsupported.
 Motion is derived from measured velocity thresholds, not from the last
 `Move()` call.
+
+Coarse mode 0 is not a complete capability description. The V2.0 state machine
+separates Agile from Standing Lock, so the classifier preserves that difference
+as ready stand versus locked stand. This avoids both an internal walking flag
+and a circular policy that waits for locomotion State before allowing the first
+`Move()` that can produce it.
 
 The source field name `error_code` is retained only at the DDS adapter. The
 controller and public State call it `state_machine_code` and preserve its exact
@@ -132,7 +145,7 @@ eligibility is derived from its physical class:
 
 | Physical State | Posture input | Velocity input |
 | --- | --- | --- |
-| Damping, Down, idle stand | accept | reject |
+| Damping, Down, locked stand | accept | reject |
 | ready stand, locomotion | accept | accept |
 | Transition, Unsupported, Unknown | reject | reject |
 
@@ -165,7 +178,7 @@ never represents the physical posture.
 ```text
 State quiescent damping -> RecoveryStand -> Unknown -> wait for newer State
 State down              -> StandUp       -> Unknown -> wait for newer State
-State idle stand        -> BalanceStand  -> Unknown -> wait for newer State
+State locked stand      -> BalanceStand  -> Unknown -> wait for newer State
 State ready stand       -> request complete
 State moving damping    -> wait
 ```
@@ -181,7 +194,7 @@ Stand request can replace a pending Down request while Damping is observed.
 
 ```text
 State down -> request complete, no StopMove
-idle stand, ready stand, or locomotion
+locked stand, ready stand, or locomotion
            -> StopMove once -> Unknown -> wait for newer State
 any supported standing class, now quiescent
            -> StandDown     -> Unknown -> wait for newer State
@@ -213,7 +226,7 @@ Shutdown disables and clears normal command input, then uses the same down
 workflow:
 
 ```text
-fresh idle/ready/locomotion State
+fresh locked/ready/locomotion State
                 -> StopMove once -> newer quiescent supported standing State
                 -> StandDown -> newer down State -> exit
 fresh down State -> exit without redundant SDK calls
@@ -267,7 +280,7 @@ velocity and posture wire commands. It does not define an explicit stop command.
    State.
 9. RPC results never complete or advance a posture workflow.
 10. `StopMove()` occurs at most once per down request and nowhere else.
-11. `StandDown()` requires newer, quiescent idle/ready/locomotion State after
+11. `StandDown()` requires newer, quiescent locked/ready/locomotion State after
     `StopMove()`.
 12. Damping never confirms Down or shutdown completion.
 13. Shutdown uses Stop-then-Down and does not stop an already-down robot.
@@ -279,7 +292,8 @@ velocity and posture wire commands. It does not define an explicit stop command.
 Tests cover behavior rather than private synchronization machinery:
 
 - table-driven state-machine, coarse-mode, and motion classification;
-- the real-hardware `100` (Agile), mode-0 startup State;
+- the real-hardware `100` (Agile), mode-0 ready State accepting velocity;
+- `1002` Standing Lock mode 0 remaining locked until `BalanceStand()`;
 - the real-hardware quiescent `1001` (Damping) State after `StandDown()` and a
   subsequent Stand request using `RecoveryStand()`;
 - V2.0 Standing Lock, Balance Standing, and Crouch classification;
