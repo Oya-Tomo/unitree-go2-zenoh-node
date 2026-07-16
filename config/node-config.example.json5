@@ -12,7 +12,7 @@
 
   state: {
     startup_timeout_seconds: 1.0,
-    maximum_age_seconds: 0.5,
+    maximum_age_seconds: 0.2,
     linear_velocity_quiescent_threshold: 0.03,
     yaw_speed_quiescent_threshold: 0.05,
   },

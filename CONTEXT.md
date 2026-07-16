@@ -1,54 +1,53 @@
 # Domain context
 
-This glossary defines the small set of terms used by the Go2 control node.
-Implementation decisions belong in ADRs.
+This glossary defines the terms used by the Go2 control node. Architecture
+decisions belong in ADRs.
+
+## State freshness
+
+Whether the node has received a valid `SportModeState` within
+`maximum_age_seconds`, measured with the local monotonic clock. Freshness is
+the only condition that establishes DDS connection health and opens command
+intake. A malformed sample does not refresh it.
 
 ## Robot observation
 
-One `SportModeState` sample together with its local monotonic receive time.
-Robot observations are the only evidence for physical posture and motion.
+One valid `SportModeState` sample together with its local monotonic receive
+time. Robot observations are the only evidence for physical posture and
+motion.
 
-## Physical State
+## Robot State
 
-The validity, V2.0 motion state machine, coarse mode class, measured motion, and
-robot timestamp derived from the latest fresh observation. The SDK field named
-`error_code` carries the motion state machine ID; SDK call return codes are a
-separate diagnostic channel. SDK calls and their return values never establish
-physical State. Command capability is classified from the motion state machine
-and coarse mode together; coarse mode alone is not authoritative.
+One of Damping, Down, LockedStand, ReadyStand, Locomotion, Unsupported, or
+Unknown, classified from the latest observation's V2.0 motion state machine
+and coarse mode. Measured motion is a separate moving/quiescent value used only
+to confirm Down and to guard `StandDown()`.
+
+The SDK field named `error_code` carries the motion state machine ID. SDK call
+return codes are separate diagnostics and never establish Robot State.
 
 ## Unknown
 
-The physical State used when no fresh valid observation is available or after a
-posture-related SDK call. It is not an estimated posture. Commands are not
-accepted until a valid observation received after that call replaces it.
+Robot State used when no fresh valid observation exists or while waiting for a
+State received after a posture SDK call. It is not an estimated posture.
 
-## Command acceptance
+## Command intake
 
-Input eligibility is derived from confirmed physical State and command type.
-Posture is accepted in Damping, Down, and supported standing or locomotion
-States. Velocity is accepted only in ready-stand or locomotion State.
-Transition, Unsupported, Unknown, and shutdown accept neither. Acceptance lets
-a request replace its latest-value buffer; it does not by itself authorize an
-SDK call. Local monotonic receive time preserves the ordering boundary when a
-State and command arrive before the control loop applies the State.
+One global gate shared by posture and velocity commands. It is open while DDS
+State is fresh, the node is not waiting after a posture RPC, and shutdown has
+not begun. Robot State determines whether a buffered command is legal when the
+next State drives the control loop; an illegal command is discarded.
 
 ## Velocity request
 
-The latest short-lived Zenoh velocity command and its local receive time. It is
-not measured velocity. A newer velocity replaces it.
+The newest Zenoh velocity and its local receive time. It is independent of
+measured velocity and expires through the velocity deadman.
 
-## Posture request
+## Posture target
 
-The latest unprocessed Zenoh `stand` or `down` target. The control loop takes it
-as the active target on the next State; a newer target replaces that active
-workflow on a later State. Posture has priority over velocity.
-
-## Posture phase
-
-The last SDK step sent for the active posture request. It prevents duplicate
-calls while the node waits for a newer State, but it never represents the
-robot's physical posture.
+The newest `stand` or `down` request. It replaces the previous target. The last
+posture SDK action prevents duplicate calls while observations drive the
+workflow; it never represents physical posture.
 
 ## SDK diagnostic
 
@@ -57,6 +56,6 @@ operator information only and cannot advance a posture workflow.
 
 ## Published State
 
-One revisioned `{robot_key}/state` snapshot containing physical State, current
-requests, posture phase, lifecycle, and the latest SDK diagnostic without
-mixing their meanings.
+One revisioned `{robot_key}/state` snapshot containing DDS freshness, observed
+Robot State, buffered commands, the active posture target and action,
+lifecycle, and the latest SDK diagnostic without mixing their meanings.

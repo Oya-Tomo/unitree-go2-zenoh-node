@@ -215,10 +215,7 @@ class ZenohStateBus:
                 )
             else:
                 assert isinstance(command, PostureCommand)
-                accepted = self._commands.update_posture(
-                    command,
-                    received_at=received_at,
-                )
+                accepted = self._commands.update_posture(command)
             if not accepted:
                 LOGGER.debug("Ignored command while command input is disabled")
 

@@ -56,8 +56,9 @@ cp examples/keyboard-zenoh-config.example.json5 examples/keyboard-zenoh-config.j
 ```
 
 `dds.network_interface`をGo2に接続したinterfaceへ変更します。nodeとkeyboardでは
-同じ具体的な`robot_key`を使います。`maximum_age_seconds`はStateを信頼できる時間、
-速度閾値は実測値をmovingまたはquiescentに分けるための値です。
+同じ具体的な`robot_key`を使います。`maximum_age_seconds`はDDS接続のwatchdogです。
+有効なStateが0.2秒間来なければcommand受付を止め、buffer済みcommandを破棄します。
+速度閾値はDown workflowでだけ実測値をmovingまたはquiescentに分けます。
 
 Zenoh exampleには認証・暗号化がないため、信頼できるLANだけで使ってください。
 
@@ -110,10 +111,10 @@ V2.0ではDDS field名`error_code`は現在のmotion state machine IDです。no
 
 | State machine ID | Name | nodeでの扱い |
 | --- | --- | --- |
-| 100 | Agile | quiescentなmode 0/1はready stand、mode 3はlocomotion |
+| 100 | Agile | mode 0/1はready stand、mode 3はlocomotion |
 | 1001 | Damping | mode 0。姿勢は不明のまま |
-| 1002 | Standing Lock | quiescentなmode 0はlocked stand |
-| 1013 | Balance Standing | quiescentなmode 1、またはmode 3 |
+| 1002 | Standing Lock | mode 0はlocked stand |
+| 1013 | Balance Standing | mode 1はready stand、mode 3はlocomotion |
 | 1004 / 2006 | Crouch | mode 5かつquiescentならdown |
 
 DampingはCrouchやDownへ読み替えず、独立した実機Stateとして公開します。対象実機では
@@ -128,24 +129,23 @@ coarse modeだけではcommand能力を決めません。今回の実機では`B
 受け付けるready stand、同じmode 0でも`1002` Standing Lockは`BalanceStand`が必要な
 locked standとして分類します。RPC resultや内部walking flagでは区別しません。
 
-commandの受付可否とSDK実行可否は、どちらも実機Stateから決定します。
+command受付は姿勢・速度共通の1つのgateです。DDS Stateがfreshで、姿勢RPC後のStateを
+待っておらず、終了処理中でもない場合に開きます。次のStateでloopを動かしたときに
+実機Stateからcommandの実行可否を判定し、実行できないcommandは保留せず破棄します。
 
-| 実機State | 姿勢入力 | 速度入力 | Stand request | Down request | Velocity |
-| --- | --- | --- | --- | --- | --- |
-| Damping、moving | 受付 | 拒否 | 待機 | 待機 | 待機 |
-| Damping、quiescent | 受付 | 拒否 | `RecoveryStand` | 待機 | 待機 |
-| Down | 受付 | 拒否 | `StandUp` | 完了 | 待機 |
-| Locked stand | 受付 | 拒否 | `BalanceStand` | Stop後に`StandDown` | 待機 |
-| Ready stand | 受付 | 受付 | 完了 | Stop後に`StandDown` | `Move` |
-| Locomotion | 受付 | 受付 | `BalanceStand` | Stop後に`StandDown` | `Move` |
-| Transition、unsupported、Unknown | 拒否 | 拒否 | 待機 | 待機 | 待機 |
-
-その他のstate machineは公開しますが、command入力を拒否しSDK callも許可しません。
-valid StateはLifecycleを`running`にしますが、そのStateでcommandを扱えるとは限りません。
+| 実機State | Stand request | Down request | Velocity |
+| --- | --- | --- | --- |
+| Damping | quiescentなら`RecoveryStand` | 待機 | 破棄 |
+| Down | `StandUp` | 完了 | 破棄 |
+| Locked stand | `BalanceStand` | Stop後に`StandDown` | 破棄 |
+| Ready stand | 完了 | Stop後に`StandDown` | `Move` |
+| Locomotion | `BalanceStand` | Stop後に`StandDown` | `Move` |
+| Unsupported | 新規requestを破棄 | 新規requestを破棄 | 破棄 |
+| Unknown | 拒否 | 拒否 | 拒否 |
 
 姿勢に関係するSDK callの直前に、公開する実機Stateを`Unknown`にします。RPC実行中も
-Unknownのままです。RPC完了後に受信したvalid StateだけがUnknownを置き換え、その後の
-command受付は上表の姿勢・速度ごとのState policyに従います。
+Unknownのままです。RPC完了後に受信したvalid StateだけがUnknownを置き換え、command
+受付を再開します。
 
 Downは次の固定workflowです。
 
@@ -158,15 +158,14 @@ locked/ready/locomotion State -> StopMoveを1回 -> 新しいquiescent State
 次のStateがmovingのままなら、2回目の`StopMove()`も`StandDown()`も送らず待機します。
 
 終了時も同じStop→Downを行います。quiescentなCrouch/Downなら、どちらも送りません。
-Dampingと、mode 5でも実測速度がmovingなtransitionは、Stand、Down、終了を完了
-させません。
+Dampingと、mode 5でも実測速度がmovingなsampleは、Downと終了を完了させません。
 
 ## 公開State
 
 nodeは`{robot_key}/state`へpublishし、`get`にも応答します。実機由来State、request、
 最新SDK診断を分けて表示します。V2.0 motion state machineとcoarse sport modeも別々に
-公開し、姿勢入力と速度入力の受付可否も別々に示します。command名を物理姿勢として
-扱いません。
+公開し、DDSに基づくcommand受付を1つの`accepting_commands`で示します。command名を
+物理姿勢として扱いません。
 
 ## Keyboard操作
 

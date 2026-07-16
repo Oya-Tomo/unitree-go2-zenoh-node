@@ -120,9 +120,8 @@ class Dashboard:
                 ),
                 (
                     self._small_font,
-                    "Robot State: "
-                    f"{state.validity} / {state.mode_class} / {state.motion}",
-                    WARNING if state.validity == "unknown" else FOREGROUND,
+                    f"Robot State: {state.state} / {state.motion}",
+                    WARNING if state.state == "unknown" else FOREGROUND,
                 ),
                 (
                     self._small_font,
@@ -141,7 +140,7 @@ class Dashboard:
                     self._small_font,
                     "Requested posture: "
                     f"{snapshot.requested_posture or 'none'}  "
-                    f"phase={snapshot.posture_phase or 'none'}",
+                    f"action={snapshot.posture_action or 'none'}",
                     FOREGROUND,
                 ),
                 (
@@ -158,9 +157,9 @@ class Dashboard:
                 ),
                 (
                     self._small_font,
-                    "Accepting: "
-                    f"posture={snapshot.accepting_posture}  "
-                    f"velocity={snapshot.accepting_velocity}",
+                    "DDS connected: "
+                    f"{snapshot.connected}  "
+                    f"accepting commands={snapshot.accepting_commands}",
                     FOREGROUND,
                 ),
                 (

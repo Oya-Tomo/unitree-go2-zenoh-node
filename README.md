@@ -56,9 +56,10 @@ cp examples/keyboard-zenoh-config.example.json5 examples/keyboard-zenoh-config.j
 ```
 
 Set `dds.network_interface` to the interface connected to the Go2. The node and
-keyboard must use the same concrete `robot_key`. `maximum_age_seconds` limits
-how long a State sample remains usable; the velocity thresholds distinguish
-measured motion from quiescence.
+keyboard must use the same concrete `robot_key`. `maximum_age_seconds` is the
+DDS connection watchdog: after 0.2 seconds without a valid State, commands are
+rejected and buffered commands are cleared. The velocity thresholds distinguish
+measured motion from quiescence only for the Down workflow.
 
 The example Zenoh files have no authentication or encryption and are intended
 for a trusted local network.
@@ -114,10 +115,10 @@ Agile. The controller currently acts only on these state machines:
 
 | State machine ID | Name | Use in this node |
 | --- | --- | --- |
-| 100 | Agile | quiescent mode 0/1 is ready stand; mode 3 is locomotion |
+| 100 | Agile | mode 0/1 is ready stand; mode 3 is locomotion |
 | 1001 | Damping | mode 0; posture remains unknown |
-| 1002 | Standing Lock | quiescent mode 0 is locked stand |
-| 1013 | Balance Standing | quiescent mode 1, or mode 3 |
+| 1002 | Standing Lock | mode 0 is locked stand |
+| 1013 | Balance Standing | mode 1 is ready stand; mode 3 is locomotion |
 | 1004 / 2006 | Crouch | down when mode 5 is quiescent |
 
 Damping is reported as its own physical class, not as Crouch or Down. The
@@ -135,26 +136,24 @@ ready stand that can accept `Move`; `1002` Standing Lock with the same mode 0
 must first receive `BalanceStand`. No RPC result or internal walking flag is
 used to distinguish them.
 
-Input eligibility and SDK authorization are both derived from physical State:
+Command intake has one gate for both command types. It is open while DDS State
+is fresh, the node is not waiting after a posture RPC, and shutdown has not
+begun. Robot State authorizes the command only when the next State drives the
+loop; an illegal command is discarded rather than delayed.
 
-| Robot State | Posture input | Velocity input | Stand request | Down request | Velocity |
-| --- | --- | --- | --- | --- | --- |
-| Damping, moving | accept | reject | wait | wait | wait |
-| Damping, quiescent | accept | reject | `RecoveryStand` | wait | wait |
-| Down | accept | reject | `StandUp` | complete | wait |
-| Locked stand | accept | reject | `BalanceStand` | Stop then `StandDown` | wait |
-| Ready stand | accept | accept | complete | Stop then `StandDown` | `Move` |
-| Locomotion | accept | accept | `BalanceStand` | Stop then `StandDown` | `Move` |
-| Transition, unsupported, Unknown | reject | reject | wait | wait | wait |
-
-Other state machines remain visible but reject command input and authorize no
-SDK call. Any valid State makes the lifecycle `running`; it does not make that
-State command-capable.
+| Robot State | Stand request | Down request | Velocity |
+| --- | --- | --- | --- |
+| Damping | `RecoveryStand` when quiescent | wait | discard |
+| Down | `StandUp` | complete | discard |
+| Locked stand | `BalanceStand` | Stop then `StandDown` | discard |
+| Ready stand | complete | Stop then `StandDown` | `Move` |
+| Locomotion | `BalanceStand` | Stop then `StandDown` | `Move` |
+| Unsupported | discard new request | discard new request | discard |
+| Unknown | reject | reject | reject |
 
 Before each posture SDK call, the node publishes robot State as `Unknown`.
 It remains Unknown during the RPC. Only a valid State received after the RPC
-returns can replace it. Command input then follows the State-specific posture
-and velocity rules above.
+returns can replace it and reopen command intake.
 
 Down is a fixed State-driven workflow:
 
@@ -169,15 +168,15 @@ waits without sending either another `StopMove()` or `StandDown()`.
 
 Shutdown follows the same Stop-then-Down workflow. If the robot reports a
 quiescent Crouch/Down State, shutdown sends neither command. Damping and a
-moving mode-5 sample cannot complete Stand, Down, or shutdown.
+moving mode-5 sample cannot complete Down or shutdown.
 
 ## Published State
 
 The node publishes and answers `get` on `{robot_key}/state`. The snapshot keeps
 robot-derived State separate from requested commands and the latest SDK
 diagnostic. It reports the V2.0 motion state machine separately from the coarse
-sport mode, plus separate posture- and velocity-input acceptance flags. A
-command name is never presented as a physical posture.
+sport mode and exposes one `accepting_commands` value for DDS-backed command
+intake. A command name is never presented as a physical posture.
 
 ## Keyboard controls
 
