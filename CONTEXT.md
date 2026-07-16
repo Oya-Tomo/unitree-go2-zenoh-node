@@ -22,11 +22,15 @@ The physical State used when no fresh valid observation is available or after a
 posture-related SDK call. It is not an estimated posture. Commands are not
 accepted until a valid observation received after that call replaces it.
 
-## Actionable State
+## Command acceptance
 
-A confirmed down, quiescent idle stand, quiescent ready stand, or locomotion
-State. Actionability is derived only from the robot observation. Runtime command
-acceptance additionally depends on startup, posture-call, and shutdown gates.
+Input eligibility is derived from confirmed physical State and command type.
+Posture is accepted in Damping, Down, and supported standing or locomotion
+States. Velocity is accepted only in ready-stand or locomotion State.
+Transition, Unsupported, Unknown, and shutdown accept neither. Acceptance lets
+a request replace its latest-value buffer; it does not by itself authorize an
+SDK call. Local monotonic receive time preserves the ordering boundary when a
+State and command arrive before the control loop applies the State.
 
 ## Velocity request
 
@@ -35,8 +39,9 @@ not measured velocity. A newer velocity replaces it.
 
 ## Posture request
 
-The latest Zenoh `stand` or `down` target. A newer posture replaces it, and a
-posture request has priority over velocity.
+The latest unprocessed Zenoh `stand` or `down` target. The control loop takes it
+as the active target on the next State; a newer target replaces that active
+workflow on a later State. Posture has priority over velocity.
 
 ## Posture phase
 

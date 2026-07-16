@@ -115,33 +115,45 @@ Agile. The controller currently acts only on these state machines:
 | State machine ID | Name | Use in this node |
 | --- | --- | --- |
 | 100 | Agile | quiescent mode 0/1, or mode 3 |
+| 1001 | Damping | mode 0; posture remains unknown |
 | 1002 | Standing Lock | quiescent mode 0 |
 | 1013 | Balance Standing | quiescent mode 1, or mode 3 |
 | 1004 / 2006 | Crouch | down when mode 5 is quiescent |
 
-Other state machines are reported but remain non-actionable. A valid unsupported
-State makes the node lifecycle `running` while command acceptance stays false.
-An inconsistent combination of a supported state machine, coarse mode, and
-measured motion is a non-actionable transition.
+Damping is reported as its own physical class, not as Crouch or Down. The
+target hardware reported it after `StandDown()` while physically low with
+compliant joints, but Damping alone does not prove posture. It therefore never
+completes Down or shutdown. A quiescent Damping State can authorize the
+official `RecoveryStand()` operation, which is defined for fallen or crouched
+robots and, according to the V2.0 interface, recovers to standing regardless of
+whether the robot has fallen.
 
-| Robot State | Stand request | Down request | Velocity |
-| --- | --- | --- | --- |
-| Quiescent Down | `StandUp` | complete | wait |
-| Quiescent idle stand | `BalanceStand` | Stop then `StandDown` | wait |
-| Quiescent ready stand | complete | Stop then `StandDown` | `Move` |
-| Locomotion | `BalanceStand` | Stop then `StandDown` | `Move` |
-| Transition, moving mode 5, unsupported, Unknown | wait | wait | wait |
+Input eligibility and SDK authorization are both derived from physical State:
+
+| Robot State | Posture input | Velocity input | Stand request | Down request | Velocity |
+| --- | --- | --- | --- | --- | --- |
+| Damping, moving | accept | reject | wait | wait | wait |
+| Damping, quiescent | accept | reject | `RecoveryStand` | wait | wait |
+| Down | accept | reject | `StandUp` | complete | wait |
+| Idle stand | accept | reject | `BalanceStand` | Stop then `StandDown` | wait |
+| Ready stand | accept | accept | complete | Stop then `StandDown` | `Move` |
+| Locomotion | accept | accept | `BalanceStand` | Stop then `StandDown` | `Move` |
+| Transition, unsupported, Unknown | reject | reject | wait | wait | wait |
+
+Other state machines remain visible but reject command input and authorize no
+SDK call. Any valid State makes the lifecycle `running`; it does not make that
+State command-capable.
 
 Before each posture SDK call, the node publishes robot State as `Unknown`.
 It remains Unknown during the RPC. Only a valid State received after the RPC
-returns can replace it, and command input resumes only when that State is
-actionable.
+returns can replace it. Command input then follows the State-specific posture
+and velocity rules above.
 
 Down is a fixed State-driven workflow:
 
 ```text
-non-down State -> StopMove once -> newer quiescent State
-               -> StandDown -> newer down State -> complete
+idle/ready/locomotion State -> StopMove once -> newer quiescent
+                            -> StandDown -> newer down State -> complete
 ```
 
 `StopMove()` is not used at startup, for stand, or for zero velocity. A `-1`
@@ -149,15 +161,16 @@ result does not cause a retry. If the next State still reports motion, the node
 waits without sending either another `StopMove()` or `StandDown()`.
 
 Shutdown follows the same Stop-then-Down workflow. If the robot reports a
-quiescent down State, shutdown sends neither command. A moving mode-5 sample is
-treated as a transition and cannot complete Stand, Down, or shutdown.
+quiescent Crouch/Down State, shutdown sends neither command. Damping and a
+moving mode-5 sample cannot complete Stand, Down, or shutdown.
 
 ## Published State
 
 The node publishes and answers `get` on `{robot_key}/state`. The snapshot keeps
 robot-derived State separate from requested commands and the latest SDK
 diagnostic. It reports the V2.0 motion state machine separately from the coarse
-sport mode. A command name is never presented as a physical posture.
+sport mode, plus separate posture- and velocity-input acceptance flags. A
+command name is never presented as a physical posture.
 
 ## Keyboard controls
 

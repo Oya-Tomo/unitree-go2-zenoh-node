@@ -106,50 +106,62 @@ freshな`SportModeState` 1 sampleを即座に採用します。SDK return value�
 
 V2.0ではDDS field名`error_code`は現在のmotion state machine IDです。nodeの公開State
 では`state_machine_code`と呼び、非zeroを失敗とは扱いません。実機起動時に観測した
-`100`はAgileです。現在このnodeがactionableにするstate machineは次のとおりです。
+`100`はAgileです。現在このnodeがSDK判断に使用するstate machineは次のとおりです。
 
 | State machine ID | Name | nodeでの扱い |
 | --- | --- | --- |
 | 100 | Agile | quiescentなmode 0/1、またはmode 3 |
+| 1001 | Damping | mode 0。姿勢は不明のまま |
 | 1002 | Standing Lock | quiescentなmode 0 |
 | 1013 | Balance Standing | quiescentなmode 1、またはmode 3 |
 | 1004 / 2006 | Crouch | mode 5かつquiescentならdown |
 
-その他のstate machineも公開しますが、SDK commandは許可しません。validだがunsupportedな
-StateではLifecycleは`running`となり、command acceptanceだけがfalseになります。対応する
-state machineでもcoarse modeと実測motionが不整合なら、非actionableなtransitionです。
+DampingはCrouchやDownへ読み替えず、独立した実機Stateとして公開します。対象実機では
+`StandDown()`後、低い伏せ姿勢かつ関節が軽い減衰抵抗で動くDampingを観測しましたが、
+Dampingだけでは姿勢を確定できません。そのためDownや終了を完了させません。一方、
+quiescentなDampingでは、転倒または伏せ姿勢からの復帰用として公式に定義されている
+`RecoveryStand()`をStand requestに使用できます。V2.0仕様では、転倒の有無にかかわらず
+立位へ復帰するcommandと明記されています。
 
-| 実機State | Stand request | Down request | Velocity |
-| --- | --- | --- | --- |
-| Quiescent Down | `StandUp` | 完了 | 待機 |
-| Quiescent idle stand | `BalanceStand` | Stop後に`StandDown` | 待機 |
-| Quiescent ready stand | 完了 | Stop後に`StandDown` | `Move` |
-| Locomotion | `BalanceStand` | Stop後に`StandDown` | `Move` |
-| Transition、moving mode 5、unsupported、Unknown | 待機 | 待機 | 待機 |
+commandの受付可否とSDK実行可否は、どちらも実機Stateから決定します。
+
+| 実機State | 姿勢入力 | 速度入力 | Stand request | Down request | Velocity |
+| --- | --- | --- | --- | --- | --- |
+| Damping、moving | 受付 | 拒否 | 待機 | 待機 | 待機 |
+| Damping、quiescent | 受付 | 拒否 | `RecoveryStand` | 待機 | 待機 |
+| Down | 受付 | 拒否 | `StandUp` | 完了 | 待機 |
+| Idle stand | 受付 | 拒否 | `BalanceStand` | Stop後に`StandDown` | 待機 |
+| Ready stand | 受付 | 受付 | 完了 | Stop後に`StandDown` | `Move` |
+| Locomotion | 受付 | 受付 | `BalanceStand` | Stop後に`StandDown` | `Move` |
+| Transition、unsupported、Unknown | 拒否 | 拒否 | 待機 | 待機 | 待機 |
+
+その他のstate machineは公開しますが、command入力を拒否しSDK callも許可しません。
+valid StateはLifecycleを`running`にしますが、そのStateでcommandを扱えるとは限りません。
 
 姿勢に関係するSDK callの直前に、公開する実機Stateを`Unknown`にします。RPC実行中も
-Unknownのままです。RPC完了後に受信したvalid StateだけがUnknownを置き換え、そのStateが
-actionableな場合だけcommand受付を再開します。
+Unknownのままです。RPC完了後に受信したvalid StateだけがUnknownを置き換え、その後の
+command受付は上表の姿勢・速度ごとのState policyに従います。
 
 Downは次の固定workflowです。
 
 ```text
-non-down State -> StopMoveを1回 -> 新しいquiescent State
-               -> StandDown -> 新しいdown State -> 完了
+idle/ready/locomotion State -> StopMoveを1回 -> 新しいquiescent State
+                            -> StandDown -> 新しいdown State -> 完了
 ```
 
 `StopMove()`は起動時、Stand、zero速度では使いません。`-1`でも再試行しません。
 次のStateがmovingのままなら、2回目の`StopMove()`も`StandDown()`も送らず待機します。
 
-終了時も同じStop→Downを行います。quiescent downなら、どちらも送りません。
-mode 5でも実測速度がmovingならtransitionとして扱い、Stand、Down、終了を完了
-しません。
+終了時も同じStop→Downを行います。quiescentなCrouch/Downなら、どちらも送りません。
+Dampingと、mode 5でも実測速度がmovingなtransitionは、Stand、Down、終了を完了
+させません。
 
 ## 公開State
 
 nodeは`{robot_key}/state`へpublishし、`get`にも応答します。実機由来State、request、
 最新SDK診断を分けて表示します。V2.0 motion state machineとcoarse sport modeも別々に
-公開し、command名を物理姿勢として扱いません。
+公開し、姿勢入力と速度入力の受付可否も別々に示します。command名を物理姿勢として
+扱いません。
 
 ## Keyboard操作
 

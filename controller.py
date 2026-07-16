@@ -78,6 +78,7 @@ class PostureTarget(StrEnum):
 
 class ModeClass(StrEnum):
     DOWN = "down"
+    DAMPING = "damping"
     IDLE_STAND = "idle_stand"
     READY_STAND = "ready_stand"
     LOCOMOTION = "locomotion"
@@ -106,6 +107,7 @@ class UnknownReason(StrEnum):
 
 class SdkCommand(StrEnum):
     STAND_UP = "stand_up"
+    RECOVERY_STAND = "recovery_stand"
     BALANCE_STAND = "balance_stand"
     STOP_MOVE = "stop_move"
     STAND_DOWN = "stand_down"
@@ -114,6 +116,7 @@ class SdkCommand(StrEnum):
 
 class PosturePhase(StrEnum):
     STAND_UP_SENT = "stand_up_sent"
+    RECOVERY_STAND_SENT = "recovery_stand_sent"
     BALANCE_STAND_SENT = "balance_stand_sent"
     STOP_SENT = "stop_sent"
     DOWN_SENT = "down_sent"
@@ -204,10 +207,18 @@ class PhysicalState(BaseModel):
         )
 
     @property
-    def is_actionable(self) -> bool:
+    def accepts_posture(self) -> bool:
         return self.validity is StateValidity.CONFIRMED and self.mode_class in {
             ModeClass.DOWN,
+            ModeClass.DAMPING,
             ModeClass.IDLE_STAND,
+            ModeClass.READY_STAND,
+            ModeClass.LOCOMOTION,
+        }
+
+    @property
+    def accepts_velocity(self) -> bool:
+        return self.validity is StateValidity.CONFIRMED and self.mode_class in {
             ModeClass.READY_STAND,
             ModeClass.LOCOMOTION,
         }
@@ -248,7 +259,13 @@ def classify_state(
     )
     motion = Motion.MOVING if moving else Motion.QUIESCENT
     state_machine = observation.state_machine_code
-    if state_machine in {
+    if state_machine == Go2MotionStateMachine.DAMPING:
+        mode_class = (
+            ModeClass.DAMPING
+            if observation.mode == Go2SportMode.IDLE
+            else ModeClass.TRANSITION
+        )
+    elif state_machine in {
         Go2MotionStateMachine.CROUCH,
         Go2MotionStateMachine.ALTERNATE_CROUCH,
     }:
@@ -327,7 +344,8 @@ class PostureRequest:
 class BufferedCommands:
     velocity: VelocityRequest | None
     posture: PostureRequest | None
-    accepting: bool
+    accepting_velocity: bool
+    accepting_posture: bool
 
 
 class CommandBuffer:
@@ -336,12 +354,13 @@ class CommandBuffer:
     def __init__(self) -> None:
         self._velocity: VelocityRequest | None = None
         self._posture: PostureRequest | None = None
-        self._accepting = False
+        self._accepting_velocity = False
+        self._accepting_posture = False
         self._lock = Lock()
 
     def update_velocity(self, command: VelocityCommand, *, received_at: float) -> bool:
         with self._lock:
-            if not self._accepting:
+            if not self._accepting_velocity:
                 return False
             self._velocity = VelocityRequest(
                 command.vx,
@@ -353,7 +372,7 @@ class CommandBuffer:
 
     def update_posture(self, command: PostureCommand, *, received_at: float) -> bool:
         with self._lock:
-            if not self._accepting:
+            if not self._accepting_posture:
                 return False
             self._posture = PostureRequest(command.posture, received_at)
             return True
@@ -363,42 +382,69 @@ class CommandBuffer:
             return BufferedCommands(
                 velocity=self._velocity,
                 posture=self._posture,
-                accepting=self._accepting,
+                accepting_velocity=self._accepting_velocity,
+                accepting_posture=self._accepting_posture,
             )
 
-    def resume(self) -> None:
+    def apply_state_acceptance(
+        self,
+        *,
+        state_received_at: float,
+        posture: bool,
+        velocity: bool,
+    ) -> None:
+        """Apply one State boundary and discard commands received behind it."""
+
         with self._lock:
-            self._accepting = True
+            self._accepting_posture = posture
+            self._accepting_velocity = velocity
+            if (
+                not posture
+                and self._posture is not None
+                and self._posture.received_at >= state_received_at
+            ):
+                self._posture = None
+            if (
+                not velocity
+                and self._velocity is not None
+                and self._velocity.received_at >= state_received_at
+            ):
+                self._velocity = None
 
     def pause(self, *, clear: bool = False) -> None:
         with self._lock:
-            self._accepting = False
+            self._accepting_posture = False
+            self._accepting_velocity = False
             if clear:
                 self._velocity = None
                 self._posture = None
 
-    def begin_posture(self, expected: PostureRequest) -> bool:
-        """Atomically block new commands before one posture SDK call."""
+    def take_posture(self) -> PostureRequest | None:
+        """Take the latest unprocessed posture request."""
 
         with self._lock:
-            if not self._accepting or self._posture is not expected:
+            posture = self._posture
+            self._posture = None
+            return posture
+
+    def begin_posture(self) -> bool:
+        """Block input if no newer posture supersedes the active workflow."""
+
+        with self._lock:
+            if not self._accepting_posture or self._posture is not None:
                 return False
-            self._accepting = False
+            self._accepting_posture = False
+            self._accepting_velocity = False
             self._velocity = None
             return True
 
     def begin_velocity(self, expected: VelocityRequest) -> bool:
         with self._lock:
             return (
-                self._accepting and self._posture is None and self._velocity is expected
+                self._accepting_velocity
+                and self._posture is None
+                and self._velocity is expected
             )
-
-    def clear_posture(self, expected: PostureRequest) -> bool:
-        with self._lock:
-            if self._posture is not expected:
-                return False
-            self._posture = None
-            return True
 
     def clear_velocity(self, expected: VelocityRequest) -> bool:
         with self._lock:
@@ -410,6 +456,8 @@ class CommandBuffer:
 
 class SportClientProtocol(Protocol):
     def StandUp(self) -> int: ...
+
+    def RecoveryStand(self) -> int: ...
 
     def BalanceStand(self) -> int: ...
 
@@ -448,7 +496,8 @@ class NodeState(BaseModel):
     revision: int
     lifecycle: Lifecycle
     robot: PhysicalState
-    accepting_commands: bool
+    accepting_posture: bool
+    accepting_velocity: bool
     requested_posture: PostureTarget | None
     requested_velocity: VelocitySnapshot | None
     posture_phase: PosturePhase | None
@@ -523,11 +572,15 @@ class Controller:
         else:
             if self._state.validity is StateValidity.CONFIRMED:
                 self._lifecycle = Lifecycle.RUNNING
-            if self._state.is_actionable:
-                self._commands.resume()
+            accepts_posture = self._state.accepts_posture
+            accepts_velocity = self._state.accepts_velocity
+            self._commands.apply_state_acceptance(
+                state_received_at=observation.received_at,
+                posture=accepts_posture,
+                velocity=accepts_velocity,
+            )
+            if accepts_posture or accepts_velocity:
                 self._process_buffered_commands(now)
-            else:
-                self._commands.pause()
         self.publish()
 
     def reject_state(self, error: str) -> None:
@@ -577,14 +630,17 @@ class Controller:
         self._revision += 1
         buffered = self._commands.snapshot()
         velocity = buffered.velocity
+        pending_posture = buffered.posture
+        visible_posture = pending_posture or self._active_posture
         self._state_sink.publish(
             NodeState(
                 revision=self._revision,
                 lifecycle=self._lifecycle,
                 robot=self._state,
-                accepting_commands=buffered.accepting,
+                accepting_posture=buffered.accepting_posture,
+                accepting_velocity=buffered.accepting_velocity,
                 requested_posture=(
-                    buffered.posture.target if buffered.posture is not None else None
+                    visible_posture.target if visible_posture is not None else None
                 ),
                 requested_velocity=(
                     VelocitySnapshot(
@@ -596,23 +652,22 @@ class Controller:
                     if velocity is not None
                     else None
                 ),
-                posture_phase=self._posture_phase,
+                posture_phase=(
+                    self._posture_phase if pending_posture is None else None
+                ),
                 last_sdk=self._last_sdk,
                 last_error=self._last_error,
             )
         )
 
     def _process_buffered_commands(self, now: float) -> None:
-        buffered = self._commands.snapshot()
-        posture = buffered.posture
-        if posture is not self._active_posture:
+        posture = self._commands.take_posture()
+        if posture is not None:
             self._active_posture = posture
             self._posture_phase = None
 
-        if posture is not None:
-            if not self._process_posture(posture):
-                return
-            if not self._commands.clear_posture(posture):
+        if self._active_posture is not None:
+            if not self._process_posture(self._active_posture):
                 return
             self._active_posture = None
             self._posture_phase = None
@@ -624,25 +679,34 @@ class Controller:
 
     def _process_posture(self, request: PostureRequest) -> bool:
         state = self._state
-        if not state.is_actionable:
+        if state.validity is not StateValidity.CONFIRMED:
             return False
 
         if request.target is PostureTarget.STAND:
             if state.mode_class is ModeClass.READY_STAND:
                 return True
-            if self._posture_phase is PosturePhase.BALANCE_STAND_SENT:
+            if state.mode_class is ModeClass.DAMPING:
+                if (
+                    state.motion is Motion.QUIESCENT
+                    and self._posture_phase is not PosturePhase.RECOVERY_STAND_SENT
+                ):
+                    self._dispatch_posture(
+                        SdkCommand.RECOVERY_STAND,
+                        PosturePhase.RECOVERY_STAND_SENT,
+                    )
                 return False
             if state.mode_class is ModeClass.DOWN:
-                if self._posture_phase is None:
+                if self._posture_phase is not PosturePhase.STAND_UP_SENT:
                     self._dispatch_posture(
-                        request,
                         SdkCommand.STAND_UP,
                         PosturePhase.STAND_UP_SENT,
                     )
                 return False
-            if state.mode_class in {ModeClass.IDLE_STAND, ModeClass.LOCOMOTION}:
+            if (
+                state.mode_class in {ModeClass.IDLE_STAND, ModeClass.LOCOMOTION}
+                and self._posture_phase is not PosturePhase.BALANCE_STAND_SENT
+            ):
                 self._dispatch_posture(
-                    request,
                     SdkCommand.BALANCE_STAND,
                     PosturePhase.BALANCE_STAND_SENT,
                 )
@@ -651,11 +715,15 @@ class Controller:
         if state.mode_class is ModeClass.DOWN:
             return True
         if self._posture_phase is None:
-            self._dispatch_posture(
-                request,
-                SdkCommand.STOP_MOVE,
-                PosturePhase.STOP_SENT,
-            )
+            if state.mode_class in {
+                ModeClass.IDLE_STAND,
+                ModeClass.READY_STAND,
+                ModeClass.LOCOMOTION,
+            }:
+                self._dispatch_posture(
+                    SdkCommand.STOP_MOVE,
+                    PosturePhase.STOP_SENT,
+                )
         elif (
             self._posture_phase is PosturePhase.STOP_SENT
             and state.motion is Motion.QUIESCENT
@@ -663,7 +731,6 @@ class Controller:
             in {ModeClass.IDLE_STAND, ModeClass.READY_STAND, ModeClass.LOCOMOTION}
         ):
             self._dispatch_posture(
-                request,
                 SdkCommand.STAND_DOWN,
                 PosturePhase.DOWN_SENT,
             )
@@ -685,13 +752,12 @@ class Controller:
 
     def _dispatch_posture(
         self,
-        request: PostureRequest,
         command: SdkCommand,
         phase: PosturePhase,
     ) -> None:
         if (
             self._lifecycle is not Lifecycle.SHUTTING_DOWN
-            and not self._commands.begin_posture(request)
+            and not self._commands.begin_posture()
         ):
             return
         self._posture_phase = phase
@@ -701,7 +767,7 @@ class Controller:
         self._state_required_after = self._clock()
 
     def _process_shutdown_state(self) -> None:
-        if not self._state.is_actionable or self._active_posture is None:
+        if self._active_posture is None:
             return
         if self._process_posture(self._active_posture):
             self._shutdown_complete = True
@@ -714,6 +780,8 @@ class Controller:
         try:
             if command is SdkCommand.STAND_UP:
                 code = self._client.StandUp()
+            elif command is SdkCommand.RECOVERY_STAND:
+                code = self._client.RecoveryStand()
             elif command is SdkCommand.BALANCE_STAND:
                 code = self._client.BalanceStand()
             elif command is SdkCommand.STOP_MOVE:

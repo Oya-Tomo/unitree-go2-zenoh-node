@@ -158,7 +158,9 @@ class Dashboard:
                 ),
                 (
                     self._small_font,
-                    f"Accepting commands: {snapshot.accepting_commands}",
+                    "Accepting: "
+                    f"posture={snapshot.accepting_posture}  "
+                    f"velocity={snapshot.accepting_velocity}",
                     FOREGROUND,
                 ),
                 (
