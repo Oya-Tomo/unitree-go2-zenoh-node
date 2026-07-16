@@ -33,8 +33,9 @@ control policy, and `config.py` for configuration. See
 
 ## Install
 
-Requirements are Python 3.13, uv, a local CycloneDDS build, and a reachable
-Go2.
+Requirements are Python 3.13, uv, a local CycloneDDS build, and a reachable Go2
+Edu running software V1.1.6 or later. The State classifier targets Unitree's
+Motion Control Service Interface V2.0.
 
 ```bash
 git clone --recurse-submodules https://github.com/Oya-Tomo/unitree-go2-zenoh-node.git
@@ -106,17 +107,35 @@ priority over velocity. There is no explicit stop command; zero velocity uses
 A fresh `SportModeState` sample is used immediately. SDK return values are
 diagnostics and never establish posture or motion.
 
+On the V2.0 interface, the DDS field named `error_code` is the current motion
+state machine ID. It is published as `state_machine_code`; a nonzero value does
+not mean failure. In particular, the real-hardware startup value `100` means
+Agile. The controller currently acts only on these state machines:
+
+| State machine ID | Name | Use in this node |
+| --- | --- | --- |
+| 100 | Agile | quiescent mode 0/1, or mode 3 |
+| 1002 | Standing Lock | quiescent mode 0 |
+| 1013 | Balance Standing | quiescent mode 1, or mode 3 |
+| 1004 / 2006 | Crouch | down when mode 5 is quiescent |
+
+Other state machines are reported but remain non-actionable. A valid unsupported
+State makes the node lifecycle `running` while command acceptance stays false.
+An inconsistent combination of a supported state machine, coarse mode, and
+measured motion is a non-actionable transition.
+
 | Robot State | Stand request | Down request | Velocity |
 | --- | --- | --- | --- |
 | Quiescent Down | `StandUp` | complete | wait |
-| Idle stand | `BalanceStand` | Stop then `StandDown` | wait |
-| Ready stand | complete | Stop then `StandDown` | `Move` |
+| Quiescent idle stand | `BalanceStand` | Stop then `StandDown` | wait |
+| Quiescent ready stand | complete | Stop then `StandDown` | `Move` |
 | Locomotion | `BalanceStand` | Stop then `StandDown` | `Move` |
-| Transition, moving mode 5, unsupported, fault, Unknown | wait | wait | wait |
+| Transition, moving mode 5, unsupported, Unknown | wait | wait | wait |
 
 Before each posture SDK call, the node publishes robot State as `Unknown`.
-It remains Unknown during the RPC. Until a newer valid State arrives, the node
-ignores all incoming commands.
+It remains Unknown during the RPC. Only a valid State received after the RPC
+returns can replace it, and command input resumes only when that State is
+actionable.
 
 Down is a fixed State-driven workflow:
 
@@ -137,7 +156,8 @@ treated as a transition and cannot complete Stand, Down, or shutdown.
 
 The node publishes and answers `get` on `{robot_key}/state`. The snapshot keeps
 robot-derived State separate from requested commands and the latest SDK
-diagnostic. A command name is never presented as a physical posture.
+diagnostic. It reports the V2.0 motion state machine separately from the coarse
+sport mode. A command name is never presented as a physical posture.
 
 ## Keyboard controls
 

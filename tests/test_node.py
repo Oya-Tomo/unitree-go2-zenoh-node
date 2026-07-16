@@ -18,7 +18,7 @@ class FakeStamp:
 @dataclass(frozen=True)
 class FakeState:
     stamp: FakeStamp = FakeStamp()
-    error_code: int = 0
+    error_code: int = 100
     mode: int = 5
     velocity: tuple[float, float, float] = (0.1, 0.2, 0.3)
     yaw_speed: float = 0.4
@@ -38,6 +38,7 @@ class NodeBoundaryTests(unittest.TestCase):
         self.assertEqual(observation.velocity, (0.1, 0.2, 0.3))
         self.assertEqual(observation.stamp_sec, 12)
         self.assertEqual(observation.stamp_nanosec, 34)
+        self.assertEqual(observation.state_machine_code, 100)
 
     def test_state_inbox_keeps_only_the_latest_update(self) -> None:
         inbox = StateInbox()

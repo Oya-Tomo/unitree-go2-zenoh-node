@@ -1,6 +1,6 @@
 # ADR-0001: Drive Every SDK Decision from the Latest Robot State
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-07-16
 - Issue: #3
 
@@ -15,6 +15,13 @@ Real-hardware testing exposed the mismatch. `StopMove()` can return `-1` while
 the robot is physically down, and using that result to infer posture or to
 retry indefinitely prevents a later stand request. The robot's
 `SportModeState` must be the only physical-state authority.
+
+A second real-hardware trace exposed a versioned field-semantics error. On Go2
+software V1.1.6 and later, the Motion Control Service Interface V2.0 uses the
+DDS field named `error_code` to publish the current motion state machine ID.
+The observed value `100` means Agile; it is not an error. Treating every
+nonzero value as a fault left a confirmed idle State in lifecycle `starting`
+and disabled all commands.
 
 The implementation must also remain small enough that command ordering and all
 safety branches can be read directly from the control loop.
@@ -46,23 +53,54 @@ transition.
 ## Physical State
 
 A fresh, parseable `SportModeState` sample is classified immediately. No
-multi-sample confirmation is required.
+multi-sample confirmation is required, but standing and down classes require
+that sample's measured motion to be quiescent.
 
 The following fields are read from the robot:
 
-- mode;
-- error code;
+- V2.0 motion state machine ID, carried in the SDK field named `error_code`;
+- coarse sport mode;
 - measured velocity and yaw speed; and
 - robot timestamp.
 
-Modes 0, 1, and 3 are classified as idle stand, ready stand, and locomotion.
-Mode 5 is down only when measured motion is quiescent; a moving mode-5 sample is
-an inconsistent transition and authorizes no command. Modes 2 and 8 are also
-transitions. Other modes are unsupported. Motion is derived from measured
-velocity thresholds, not from the last `Move()` call.
+The node targets the V2.0 interface. It assigns physical classes only to the
+state machines used by this controller:
+
+| State machine ID | State machine | Coarse mode | Physical class |
+| --- | --- | --- | --- |
+| 100 | Agile | 0 and quiescent | idle stand |
+| 100 | Agile | 1 and quiescent | ready stand |
+| 100 | Agile | 3 | locomotion |
+| 1002 | Standing Lock | 0 and quiescent | idle stand |
+| 1013 | Balance Standing | 1 and quiescent | ready stand |
+| 1013 | Balance Standing | 3 | locomotion |
+| 1004 or 2006 | Crouch | 5 and quiescent | down |
+
+An inconsistent combination is a transition. A moving standing or Crouch sample
+cannot confirm a posture. Other state machines, including damping and special
+actions, are unsupported and authorize no command. Motion is derived from
+measured velocity thresholds, not from the last `Move()` call.
+
+The source field name `error_code` is retained only at the DDS adapter. The
+controller and public State call it `state_machine_code` and preserve its exact
+value. SDK RPC return codes such as 3104, 4101, 4201, 4205, and 4206 are a
+separate diagnostic channel.
 
 Missing, malformed, or stale State is `Unknown` and authorizes no SDK call.
 SDK return codes and exceptions are diagnostics only.
+
+References:
+
+- [Unitree Motion Control Service Interface V2.0](https://support.unitree.com/home/en/developer/Motion_Services_Interface_V2.0)
+- [Unitree ROS 2 SportModeState definition](https://github.com/unitreerobotics/unitree_ros2#1-sportmode-state)
+
+The message does not carry an interface-version discriminator. Deployment on a
+Go2 Edu running V1.1.6 or later is therefore a precondition rather than
+something the node can prove at runtime. An older interface that reports an
+actual error whose numeric value collides with an allowed V2.0 state machine ID
+could be misclassified. The node fails closed for other values; this numeric
+collision remains an accepted deployment risk until Unitree exposes a reliable
+runtime discriminator.
 
 ## Command buffering and priority
 
@@ -75,8 +113,11 @@ The buffers have these semantics:
 - no FIFO command history is retained.
 
 At startup, and after a posture-related SDK call, command input is disabled.
-It is enabled again only after a newer valid robot State has been processed.
-Commands arriving while disabled are ignored rather than deferred.
+A newer valid robot State replaces `Unknown`; command input is enabled only
+when that State is actionable. Commands arriving while disabled are ignored
+rather than deferred. Lifecycle becomes `running` after any fresh, parseable
+State; State actionability and runtime command acceptance remain separate
+properties.
 
 A command received after the loop inspected its buffer waits for the next
 State. This is the loop's ordering boundary; a later command does not cancel an
@@ -91,8 +132,8 @@ never represents the physical posture.
 
 ```text
 State down       -> StandUp   -> Unknown -> wait for newer State
-State idle stand -> BalanceStand -> Unknown -> wait for newer State
-State ready      -> request complete
+State quiescent idle stand -> BalanceStand -> Unknown -> wait for newer State
+State quiescent ready      -> request complete
 ```
 
 After `StandUp()`, a repeated down State does not resend it. After
@@ -144,7 +185,7 @@ Unknown State        -> wait until shutdown timeout, then exit with an error
 The node publishes one `{robot_key}/state` snapshot containing only:
 
 - lifecycle;
-- robot-derived State;
+- robot-derived State, including motion state machine and coarse mode;
 - whether commands are currently accepted;
 - latest requested posture and velocity;
 - the small posture workflow phase;
@@ -153,8 +194,8 @@ The node publishes one `{robot_key}/state` snapshot containing only:
 
 Immediately before invoking `StandUp`, `BalanceStand`, `StopMove`, or
 `StandDown`, the node publishes robot State as `Unknown`. It remains Unknown
-during the synchronous RPC. A sample received before that SDK call began cannot
-clear the Unknown state even if it remained queued locally.
+during the synchronous RPC. The post-command receive-time cutoff is recorded
+when the RPC returns, so only a later sample can replace the Unknown state.
 
 ## Files and responsibilities
 
@@ -172,22 +213,28 @@ velocity and posture wire commands. It does not define an explicit stop command.
 ## Invariants
 
 1. Only robot State establishes physical posture or motion.
-2. Zenoh receipt alone never calls the SDK.
-3. One processed State produces at most one SDK call.
-4. Posture has priority over velocity.
-5. At most one latest velocity and one latest posture are retained.
-6. A posture SDK call makes physical State `Unknown` immediately.
-7. No command is accepted until a newer valid State clears that Unknown state.
-8. RPC results never complete or advance a posture workflow.
-9. `StopMove()` occurs at most once per down request and nowhere else.
-10. `StandDown()` requires newer, quiescent, non-down State after `StopMove()`.
-11. Shutdown uses Stop-then-Down and does not stop an already-down robot.
+2. The V2.0 motion state machine ID is never interpreted as an RPC error.
+3. Zenoh receipt alone never calls the SDK.
+4. One processed State produces at most one SDK call.
+5. Posture has priority over velocity.
+6. At most one latest velocity and one latest posture are retained.
+7. A posture SDK call makes physical State `Unknown` before and during the RPC.
+8. Only a valid State received after the RPC replaces that Unknown state, and
+   command input resumes only if the replacement State is actionable.
+9. RPC results never complete or advance a posture workflow.
+10. `StopMove()` occurs at most once per down request and nowhere else.
+11. `StandDown()` requires newer, quiescent, non-down State after `StopMove()`.
+12. Shutdown uses Stop-then-Down and does not stop an already-down robot.
 
 ## Test design
 
 Tests cover behavior rather than private synchronization machinery:
 
-- one-sample classification and motion thresholds;
+- table-driven state-machine, coarse-mode, and motion classification;
+- the real-hardware `100` (Agile), mode-0 startup State;
+- V2.0 Standing Lock, Balance Standing, and Crouch classification;
+- unsupported state machines remaining non-actionable without holding lifecycle
+  in `starting`;
 - moving mode 5 remaining non-actionable;
 - down-to-stand State sequence;
 - moving-to-down sequence with `StopMove() == -1`;

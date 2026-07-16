@@ -126,9 +126,15 @@ class Dashboard:
                 ),
                 (
                     self._small_font,
-                    f"State reason: {state.reason or 'none'}  "
-                    f"mode={state.mode} ({state.mode_name})  error={state.error_code}",
-                    WARNING if state.reason or state.error_code else FOREGROUND,
+                    f"State reason: {state.reason or 'none'}",
+                    WARNING if state.reason else FOREGROUND,
+                ),
+                (
+                    self._small_font,
+                    "State machine: "
+                    f"{state.state_machine_code} ({state.state_machine_name})  "
+                    f"mode={state.mode} ({state.mode_name})",
+                    FOREGROUND,
                 ),
                 (self._small_font, f"Observed: {velocity_text}", FOREGROUND),
                 (

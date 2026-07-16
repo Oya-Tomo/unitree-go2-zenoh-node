@@ -96,7 +96,7 @@ def to_observation(
         received_at=received_at,
         stamp_sec=int(stamp.sec),
         stamp_nanosec=int(stamp.nanosec),
-        error_code=int(message.error_code),
+        state_machine_code=int(message.error_code),
         mode=int(message.mode),
         velocity=(velocity[0], velocity[1], velocity[2]),
         yaw_speed=float(message.yaw_speed),
@@ -220,7 +220,7 @@ class ZenohStateBus:
                     received_at=received_at,
                 )
             if not accepted:
-                LOGGER.debug("Ignored command while physical State is Unknown")
+                LOGGER.debug("Ignored command while command input is disabled")
 
 
 def create_unitree_resources(

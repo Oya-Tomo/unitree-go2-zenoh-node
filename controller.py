@@ -41,6 +41,36 @@ class Go2SportMode(IntEnum):
     RECOVERY_STAND = 8
 
 
+class Go2MotionStateMachine(IntEnum):
+    """Go2 V2.0 motion state machine IDs carried in ``error_code``."""
+
+    AGILE = 100
+    DAMPING = 1001
+    STANDING_LOCK = 1002
+    CROUCH = 1004
+    SPECIAL_ACTION = 1006
+    SIT = 1007
+    FRONT_JUMP = 1008
+    LUNGE = 1009
+    BALANCE_STANDING = 1013
+    REGULAR_WALKING = 1015
+    REGULAR_RUNNING = 1016
+    REGULAR_ENDURANCE = 1017
+    POSE = 1091
+    ALTERNATE_CROUCH = 2006
+    DODGE = 2007
+    BOUND_RUN = 2008
+    JUMP_RUN = 2009
+    CLASSIC = 2010
+    HANDSTAND = 2011
+    FRONT_FLIP = 2012
+    BACK_FLIP = 2013
+    LEFT_FLIP = 2014
+    CROSS_STEP = 2016
+    UPRIGHT = 2017
+    TOWING = 2019
+
+
 class PostureTarget(StrEnum):
     STAND = "stand"
     DOWN = "down"
@@ -125,7 +155,7 @@ class RobotObservation:
     received_at: float
     stamp_sec: int
     stamp_nanosec: int
-    error_code: int
+    state_machine_code: int
     mode: int
     velocity: tuple[float, float, float]
     yaw_speed: float
@@ -145,7 +175,8 @@ class PhysicalState(BaseModel):
     reason: UnknownReason | None
     mode_class: ModeClass
     motion: Motion
-    error_code: int | None
+    state_machine_code: int | None
+    state_machine_name: str | None
     mode: int | None
     mode_name: str | None
     velocity: tuple[float, float, float] | None
@@ -161,7 +192,8 @@ class PhysicalState(BaseModel):
             reason=reason,
             mode_class=ModeClass.UNKNOWN,
             motion=Motion.UNKNOWN,
-            error_code=None,
+            state_machine_code=None,
+            state_machine_name=None,
             mode=None,
             mode_name=None,
             velocity=None,
@@ -172,23 +204,25 @@ class PhysicalState(BaseModel):
         )
 
     @property
-    def permits_commands(self) -> bool:
-        return (
-            self.validity is StateValidity.CONFIRMED
-            and self.error_code is None
-            and self.mode_class
-            in {
-                ModeClass.DOWN,
-                ModeClass.IDLE_STAND,
-                ModeClass.READY_STAND,
-                ModeClass.LOCOMOTION,
-            }
-        )
+    def is_actionable(self) -> bool:
+        return self.validity is StateValidity.CONFIRMED and self.mode_class in {
+            ModeClass.DOWN,
+            ModeClass.IDLE_STAND,
+            ModeClass.READY_STAND,
+            ModeClass.LOCOMOTION,
+        }
 
 
 def mode_name(mode: int) -> str:
     try:
         return Go2SportMode(mode).name.lower()
+    except ValueError:
+        return "unsupported"
+
+
+def state_machine_name(code: int) -> str:
+    try:
+        return Go2MotionStateMachine(code).name.lower()
     except ValueError:
         return "unsupported"
 
@@ -213,18 +247,44 @@ def classify_state(
         or abs(observation.yaw_speed) > yaw_speed_quiescent_threshold
     )
     motion = Motion.MOVING if moving else Motion.QUIESCENT
-    if observation.mode == Go2SportMode.LIE_DOWN:
+    state_machine = observation.state_machine_code
+    if state_machine in {
+        Go2MotionStateMachine.CROUCH,
+        Go2MotionStateMachine.ALTERNATE_CROUCH,
+    }:
         mode_class = (
-            ModeClass.DOWN if motion is Motion.QUIESCENT else ModeClass.TRANSITION
+            ModeClass.DOWN
+            if observation.mode == Go2SportMode.LIE_DOWN and motion is Motion.QUIESCENT
+            else ModeClass.TRANSITION
         )
-    elif observation.mode == Go2SportMode.IDLE:
-        mode_class = ModeClass.IDLE_STAND
-    elif observation.mode == Go2SportMode.BALANCE_STAND:
-        mode_class = ModeClass.READY_STAND
-    elif observation.mode == Go2SportMode.LOCOMOTION:
-        mode_class = ModeClass.LOCOMOTION
-    elif observation.mode in (Go2SportMode.POSE, Go2SportMode.RECOVERY_STAND):
-        mode_class = ModeClass.TRANSITION
+    elif state_machine == Go2MotionStateMachine.STANDING_LOCK:
+        mode_class = (
+            ModeClass.IDLE_STAND
+            if observation.mode == Go2SportMode.IDLE and motion is Motion.QUIESCENT
+            else ModeClass.TRANSITION
+        )
+    elif state_machine == Go2MotionStateMachine.BALANCE_STANDING:
+        if observation.mode == Go2SportMode.LOCOMOTION:
+            mode_class = ModeClass.LOCOMOTION
+        elif (
+            observation.mode == Go2SportMode.BALANCE_STAND
+            and motion is Motion.QUIESCENT
+        ):
+            mode_class = ModeClass.READY_STAND
+        else:
+            mode_class = ModeClass.TRANSITION
+    elif state_machine == Go2MotionStateMachine.AGILE:
+        if observation.mode == Go2SportMode.IDLE and motion is Motion.QUIESCENT:
+            mode_class = ModeClass.IDLE_STAND
+        elif (
+            observation.mode == Go2SportMode.BALANCE_STAND
+            and motion is Motion.QUIESCENT
+        ):
+            mode_class = ModeClass.READY_STAND
+        elif observation.mode == Go2SportMode.LOCOMOTION:
+            mode_class = ModeClass.LOCOMOTION
+        else:
+            mode_class = ModeClass.TRANSITION
     else:
         mode_class = ModeClass.UNSUPPORTED
 
@@ -233,7 +293,8 @@ def classify_state(
         reason=None,
         mode_class=mode_class,
         motion=motion,
-        error_code=observation.error_code or None,
+        state_machine_code=observation.state_machine_code,
+        state_machine_name=state_machine_name(observation.state_machine_code),
         mode=observation.mode,
         mode_name=mode_name(observation.mode),
         velocity=observation.velocity,
@@ -426,7 +487,6 @@ class Controller:
         self._last_sdk: SdkDiagnostic | None = None
         self._last_error: str | None = None
         self._lifecycle = Lifecycle.STARTING
-        self._awaiting_state = False
         self._state_required_after: float | None = None
         self._shutdown_complete = False
         self._revision = 0
@@ -448,8 +508,6 @@ class Controller:
         ):
             self.publish()
             return
-        self._awaiting_state = False
-        self._state_required_after = None
         self._state = classify_state(
             observation,
             now=now,
@@ -457,22 +515,27 @@ class Controller:
             linear_velocity_quiescent_threshold=self._linear_velocity_threshold,
             yaw_speed_quiescent_threshold=self._yaw_speed_threshold,
         )
+        if self._state.validity is StateValidity.CONFIRMED:
+            self._state_required_after = None
 
         if self._lifecycle is Lifecycle.SHUTTING_DOWN:
             self._process_shutdown_state()
-        elif self._state.permits_commands:
-            self._lifecycle = Lifecycle.RUNNING
-            self._commands.resume()
-            self._process_buffered_commands(now)
         else:
-            self._commands.pause()
+            if self._state.validity is StateValidity.CONFIRMED:
+                self._lifecycle = Lifecycle.RUNNING
+            if self._state.is_actionable:
+                self._commands.resume()
+                self._process_buffered_commands(now)
+            else:
+                self._commands.pause()
         self.publish()
 
     def reject_state(self, error: str) -> None:
         self._state = PhysicalState.unknown(UnknownReason.INVALID_SAMPLE)
         self._last_error = error
         clear_request = (
-            not self._awaiting_state and self._lifecycle is not Lifecycle.SHUTTING_DOWN
+            self._state_required_after is None
+            and self._lifecycle is not Lifecycle.SHUTTING_DOWN
         )
         self._commands.pause(clear=clear_request)
         if clear_request:
@@ -483,7 +546,7 @@ class Controller:
     def expire_state(self) -> bool:
         now = self._clock()
         if (
-            not self._awaiting_state
+            self._state_required_after is None
             and self._state.received_at is not None
             and now - self._state.received_at >= self._maximum_state_age_seconds
         ):
@@ -561,7 +624,7 @@ class Controller:
 
     def _process_posture(self, request: PostureRequest) -> bool:
         state = self._state
-        if not state.permits_commands:
+        if not state.is_actionable:
             return False
 
         if request.target is PostureTarget.STAND:
@@ -633,13 +696,12 @@ class Controller:
             return
         self._posture_phase = phase
         self._state = PhysicalState.unknown(UnknownReason.AWAITING_STATE)
-        self._awaiting_state = True
         self.publish()
-        self._state_required_after = self._clock()
         self._invoke(command)
+        self._state_required_after = self._clock()
 
     def _process_shutdown_state(self) -> None:
-        if not self._state.permits_commands or self._active_posture is None:
+        if not self._state.is_actionable or self._active_posture is None:
             return
         if self._process_posture(self._active_posture):
             self._shutdown_complete = True

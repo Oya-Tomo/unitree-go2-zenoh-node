@@ -33,7 +33,9 @@ Zenoh callbackはSDKを呼びません。中心となる実装は、processとI/
 
 ## インストール
 
-Python 3.13、uv、ローカルbuildしたCycloneDDS、到達可能なGo2が必要です。
+Python 3.13、uv、ローカルbuildしたCycloneDDS、software V1.1.6以降の到達可能な
+Go2 Eduが必要です。State classifierはUnitree Motion Control Service Interface
+V2.0を対象とします。
 
 ```bash
 git clone --recurse-submodules https://github.com/Oya-Tomo/unitree-go2-zenoh-node.git
@@ -102,17 +104,32 @@ commandはありません。zero速度には`Move(0, 0, 0)`を使います。
 freshな`SportModeState` 1 sampleを即座に採用します。SDK return valueは診断情報であり、
 姿勢やmotionを確定する根拠にはしません。
 
+V2.0ではDDS field名`error_code`は現在のmotion state machine IDです。nodeの公開State
+では`state_machine_code`と呼び、非zeroを失敗とは扱いません。実機起動時に観測した
+`100`はAgileです。現在このnodeがactionableにするstate machineは次のとおりです。
+
+| State machine ID | Name | nodeでの扱い |
+| --- | --- | --- |
+| 100 | Agile | quiescentなmode 0/1、またはmode 3 |
+| 1002 | Standing Lock | quiescentなmode 0 |
+| 1013 | Balance Standing | quiescentなmode 1、またはmode 3 |
+| 1004 / 2006 | Crouch | mode 5かつquiescentならdown |
+
+その他のstate machineも公開しますが、SDK commandは許可しません。validだがunsupportedな
+StateではLifecycleは`running`となり、command acceptanceだけがfalseになります。対応する
+state machineでもcoarse modeと実測motionが不整合なら、非actionableなtransitionです。
+
 | 実機State | Stand request | Down request | Velocity |
 | --- | --- | --- | --- |
 | Quiescent Down | `StandUp` | 完了 | 待機 |
-| Idle stand | `BalanceStand` | Stop後に`StandDown` | 待機 |
-| Ready stand | 完了 | Stop後に`StandDown` | `Move` |
+| Quiescent idle stand | `BalanceStand` | Stop後に`StandDown` | 待機 |
+| Quiescent ready stand | 完了 | Stop後に`StandDown` | `Move` |
 | Locomotion | `BalanceStand` | Stop後に`StandDown` | `Move` |
-| Transition、moving mode 5、unsupported、fault、Unknown | 待機 | 待機 | 待機 |
+| Transition、moving mode 5、unsupported、Unknown | 待機 | 待機 | 待機 |
 
 姿勢に関係するSDK callの直前に、公開する実機Stateを`Unknown`にします。RPC実行中も
-Unknownのままです。新しいvalid Stateを受信するまでは、届いたcommandをすべて
-無視します。
+Unknownのままです。RPC完了後に受信したvalid StateだけがUnknownを置き換え、そのStateが
+actionableな場合だけcommand受付を再開します。
 
 Downは次の固定workflowです。
 
@@ -131,7 +148,8 @@ mode 5でも実測速度がmovingならtransitionとして扱い、Stand、Down�
 ## 公開State
 
 nodeは`{robot_key}/state`へpublishし、`get`にも応答します。実機由来State、request、
-最新SDK診断を分けて表示し、command名を物理姿勢として扱いません。
+最新SDK診断を分けて表示します。V2.0 motion state machineとcoarse sport modeも別々に
+公開し、command名を物理姿勢として扱いません。
 
 ## Keyboard操作
 

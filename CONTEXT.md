@@ -10,15 +10,23 @@ Robot observations are the only evidence for physical posture and motion.
 
 ## Physical State
 
-The validity, mode class, motion, error code, measured velocity, and robot
-timestamp derived from the latest fresh observation. SDK calls and their return
-values never establish physical State.
+The validity, V2.0 motion state machine, coarse mode class, measured motion, and
+robot timestamp derived from the latest fresh observation. The SDK field named
+`error_code` carries the motion state machine ID; SDK call return codes are a
+separate diagnostic channel. SDK calls and their return values never establish
+physical State.
 
 ## Unknown
 
 The physical State used when no fresh valid observation is available or after a
 posture-related SDK call. It is not an estimated posture. Commands are not
-accepted until a newer valid observation replaces it.
+accepted until a valid observation received after that call replaces it.
+
+## Actionable State
+
+A confirmed down, quiescent idle stand, quiescent ready stand, or locomotion
+State. Actionability is derived only from the robot observation. Runtime command
+acceptance additionally depends on startup, posture-call, and shutdown gates.
 
 ## Velocity request
 
