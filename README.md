@@ -2,44 +2,40 @@
 
 [日本語](README_ja.md)
 
-A safety-oriented bridge from Zenoh high-level commands to the Unitree Go2
-`SportClient`. One process controls one robot through one DDS network interface.
+A standalone bridge that evaluates Zenoh commands against the latest Unitree
+Go2 `SportModeState` before calling `SportClient`.
 
 > [!WARNING]
-> This software commands physical hardware. Test with the robot supported or
-> suspended, keep the wireless remote and emergency-stop procedure available,
-> and verify the behavior on your robot/firmware before normal operation.
+> This software commands physical hardware. Support the robot, keep the remote
+> and emergency-stop procedure available, and begin with low speeds.
 
 ## Architecture
 
 ```text
-high-level policy or pygame keyboard node
-                  |
-                  | Zenoh JSON commands at 20 Hz
-                  v
-       unitree-go2-zenoh-node
-       - Pydantic validation
-       - posture state machine
-       - best-effort 250 ms watchdog
-       - observable state/queryables
-                  |
-                  | Unitree SDK2 / CycloneDDS
-                  v
-             one Go2 robot
+DDS SportModeState ---> latest State inbox ---\
+                                             +--> State-driven loop --> SDK
+Zenoh command -------> latest command buffers /
+                              |
+                              +--> {robot_key}/state
 ```
 
-The deployment unit is **one node process + one NIC + one robot**. Use a separate
-process, configuration, NIC, and unique `robot_key` for another robot. The MVP
-does not select multiple robots from one SDK process and does not arbitrate
-between command publishers.
+The loop always performs the same sequence:
 
-## Requirements and installation
+1. read the latest unprocessed robot State;
+2. inspect the latest posture and velocity buffers;
+3. evaluate posture first, then velocity; and
+4. make at most one SDK call.
 
-- Python 3.13
-- [uv](https://docs.astral.sh/uv/)
-- CycloneDDS built locally; this project was prepared with
-  `~/Packages/cyclonedds/install`
-- A Unitree Go2 reachable through the configured network interface
+Zenoh receipt alone never calls the SDK. The core implementation has only three
+files: `node.py` for process and I/O wiring, `controller.py` for State and
+control policy, and `config.py` for configuration. See
+[ADR-0001](docs/adr/0001-observed-state-driven-control-architecture.md).
+
+## Install
+
+Requirements are Python 3.13, uv, a local CycloneDDS build, and a reachable Go2
+Edu running software V1.1.6 or later. The State classifier targets Unitree's
+Motion Control Service Interface V2.0.
 
 ```bash
 git clone --recurse-submodules https://github.com/Oya-Tomo/unitree-go2-zenoh-node.git
@@ -50,13 +46,7 @@ export CYCLONEDDS_HOME="$HOME/Packages/cyclonedds/install"
 uv sync --all-groups
 ```
 
-`unitree-sdk2py` is registered in `pyproject.toml` as an editable uv path source
-at `third_party/unitree_sdk2_python`. The submodule tracks the
-`chore/cdds-py313` branch of `Oya-Tomo/unitree_sdk2_python`.
-
-## Configuration
-
-Runtime values live in JSON5 files. The CLI only selects configuration paths.
+## Configure
 
 ```bash
 cp config/node-config.example.json5 config/node-config.json5
@@ -65,20 +55,18 @@ cp examples/keyboard-config.example.json5 examples/keyboard-config.json5
 cp examples/keyboard-zenoh-config.example.json5 examples/keyboard-zenoh-config.json5
 ```
 
-Set `dds.network_interface` to the NIC connected to the robot. Set the same
-`robot_key` in the robot node and every command publisher. The example key is
-`unitree/go2`, but it may be changed to any concrete Zenoh key. The node
-republishes all state every `state_heartbeat_seconds`; the keyboard marks state
-stale after `state_stale_after_seconds` without a new heartbeat.
+Set `dds.network_interface` to the interface connected to the Go2. The node and
+keyboard must use the same concrete `robot_key`. `maximum_age_seconds` is the
+DDS connection watchdog: after 0.2 seconds without a valid State, commands are
+rejected and buffered commands are cleared. The velocity thresholds distinguish
+measured motion from quiescence only for the Down workflow.
 
-Both Zenoh examples use peer mode, multicast discovery, and the fixed listen
-endpoint `tcp/0.0.0.0:7447`. They intentionally provide no TLS, authentication,
-authorization, or router configuration. Use them only on a trusted local
-network. The example deployment assumes one robot.
+The example Zenoh files have no authentication or encryption and are intended
+for a trusted local network.
 
-## Running
+## Run
 
-Start the robot-facing node first:
+Start the robot node:
 
 ```bash
 export CYCLONEDDS_HOME="$HOME/Packages/cyclonedds/install"
@@ -87,7 +75,7 @@ uv run node.py \
   --zenoh-config config/zenoh-config.json5
 ```
 
-Then start the pygame operator node on the operator PC:
+Then start the keyboard client:
 
 ```bash
 uv run --group example python -m examples.keyboard \
@@ -95,13 +83,9 @@ uv run --group example python -m examples.keyboard \
   --zenoh-config examples/keyboard-zenoh-config.json5
 ```
 
-Only one active velocity-command publisher may control a robot. Do not run the
-pygame controller and a high-level policy for the same `robot_key` at the same
-time.
-
 ## Command contract
 
-Publish JSON to `{robot_key}/command` with encoding `application/json`.
+Publish JSON to `{robot_key}/command`.
 
 ```json
 {"type":"velocity","vx":0.5,"vy":0.0,"vyaw":0.2}
@@ -115,125 +99,103 @@ Publish JSON to `{robot_key}/command` with encoding `application/json`.
 {"type":"posture","posture":"down"}
 ```
 
-`down` calls `StandDown()`—the prone/resting posture—not the SDK's dog-like
-`Sit()` action.
+Only the latest velocity and posture are retained. A posture request has
+priority over velocity. There is no explicit stop command; zero velocity uses
+`Move(0, 0, 0)`.
 
-### Official velocity envelope
+## State-driven behavior
 
-The node validates `Move(vx, vy, vyaw)` against the ranges documented by
-[Unitree's Go2 sport service](https://support.unitree.com/home/en/developer/sports_services):
+A fresh `SportModeState` sample is used immediately. SDK return values are
+diagnostics and never establish posture or motion.
 
-| Field | Range | Unit |
-| --- | ---: | --- |
-| `vx` | `[-2.5, 3.8]` | m/s |
-| `vy` | `[-1.0, 1.0]` | m/s |
-| `vyaw` | `[-4.0, 4.0]` | rad/s |
+On the V2.0 interface, the DDS field named `error_code` is the current motion
+state machine ID. It is published as `state_machine_code`; a nonzero value does
+not mean failure. In particular, the real-hardware startup value `100` means
+Agile. The controller currently acts only on these state machines:
 
-These are validation limits, not recommended operating speeds. The keyboard
-example defaults to conservative targets of `0.5 m/s`, `0.3 m/s`, and
-`1.0 rad/s`.
+| State machine ID | Name | Use in this node |
+| --- | --- | --- |
+| 100 | Agile | mode 0/1 is ready stand; mode 3 is locomotion |
+| 1001 | Damping | mode 0; posture remains unknown |
+| 1002 | Standing Lock | mode 0 is locked stand |
+| 1013 | Balance Standing | mode 1 is ready stand; mode 3 is locomotion |
+| 1004 / 2006 | Crouch | down when mode 5 is quiescent |
 
-Unitree documents `Move` as an unfiltered command maintained for one second.
-This node deliberately forwards valid policy output without smoothing or
-clipping. Publishers must filter their own output and publish velocity at 20 Hz.
+Damping is reported as its own physical class, not as Crouch or Down. The
+target hardware reported it after `StandDown()` while physically low with
+compliant joints, but Damping alone does not prove posture. It therefore never
+completes Down or shutdown. A quiescent Damping State can authorize the
+official `RecoveryStand()` operation, which is defined for fallen or crouched
+robots and, according to the V2.0 interface, recovers to standing regardless of
+whether the robot has fallen.
 
-## Safety state machine
+The coarse mode does not determine command capability by itself. In the target
+trace, `BalanceStand()` returned zero and the standing robot continued to
+report `100` Agile with mode 0. Agile mode 0 is therefore a State-confirmed
+ready stand that can accept `Move`; `1002` Standing Lock with the same mode 0
+must first receive `BalanceStand`. No RPC result or internal walking flag is
+used to distinguish them.
 
-The operational policy is to begin with the robot physically down. The process
-does not claim that posture without telemetry: on startup it calls `StopMove()`,
-publishes posture `unknown`, and ignores velocity until an explicit stand
-sequence succeeds. A failed startup stop is retried while the node remains
-non-walkable.
+Command intake has one gate for both command types. It is open while DDS State
+is fresh, the node is not waiting after a posture RPC, and shutdown has not
+begun. Robot State authorizes the command only when the next State drives the
+loop; an illegal command is discarded rather than delayed.
+
+| Robot State | Stand request | Down request | Velocity |
+| --- | --- | --- | --- |
+| Damping | `RecoveryStand` when quiescent | wait | discard |
+| Down | `StandUp` | complete | discard |
+| Locked stand | `BalanceStand` | Stop then `StandDown` | discard |
+| Ready stand | complete | Stop then `StandDown` | `Move` |
+| Locomotion | `BalanceStand` | Stop then `StandDown` | `Move` |
+| Unsupported | discard new request | discard new request | discard |
+| Unknown | reject | reject | reject |
+
+Before each posture SDK call, the node publishes robot State as `Unknown`.
+It remains Unknown during the RPC. Only a valid State received after the RPC
+returns can replace it and reopen command intake.
+
+Down is a fixed State-driven workflow:
 
 ```text
-unknown/down -- stand --> standing_up -- 3 s + BalanceStand --> standing
-standing    -- down  --> standing_down -- StandDown ----------> down
+locked/ready/locomotion State -> StopMove once -> newer quiescent
+                              -> StandDown -> newer down State -> complete
 ```
 
-- Stand: `StopMove()` → `StandUp()` → configured delay (3 s by default) →
-  `BalanceStand()` → enable walking.
-- Down: disable walking → `StopMove()` → `StandDown()`. A failed stop remains a
-  pending down transition and is retried; `StandDown()` is never issued before
-  stop success is confirmed.
-- Pending posture input is a desired state, not a replay queue. Only one target
-  is dispatched per control-loop drain, and a pending `down` cannot be replaced
-  by a later `stand` burst. A new deliberate `stand` may be sent after that
-  `down` has been drained.
-- Velocity is ignored unless posture is `standing` and `walking_enabled` is true.
-- After the last forwarded velocity becomes stale, the monotonic watchdog calls
-  `StopMove()`. A failed stop inhibits new velocity and is retried at a bounded
-  interval until confirmed. `watchdog_triggered` refers only to this timeout,
-  not to an ordinary SDK failure.
-- The watchdog is a best-effort control-loop threshold, not a hard real-time
-  deadline. SDK calls are synchronous and block the same thread.
-  `dds.rpc_timeout_seconds` bounds each SDK request phase; one reply-bearing call
-  may contain more than one such phase and may therefore delay watchdog service.
-- Graceful `SIGINT`/`SIGTERM` shutdown attempts `StopMove()`, waits 1 s, retries
-  once after failure, and calls `StandDown()` only after a confirmed stop.
-- A hard process, host, or power failure cannot guarantee the down sequence.
+`StopMove()` is not used at startup, for stand, or for zero velocity. A `-1`
+result does not cause a retry. If the next State still reports motion, the node
+waits without sending either another `StopMove()` or `StandDown()`.
 
-## State keys
+Shutdown follows the same Stop-then-Down workflow. If the robot reports a
+quiescent Crouch/Down State, shutdown sends neither command. Damping and a
+moving mode-5 sample cannot complete Down or shutdown.
 
-The node publishes state changes with Zenoh `put`, republishes a periodic state
-heartbeat, and declares an exact Queryable for every key. Late clients can issue
-`get` requests, and live subscribers can detect a stale node locally.
+## Published State
 
-| Key | Meaning |
-| --- | --- |
-| `{robot_key}/state/command/requested` | Last valid velocity received, even when motion was inhibited |
-| `{robot_key}/state/command/applied` | Current commanded-velocity estimate: last successful `Move`, reset to zero after successful `StopMove` |
-| `{robot_key}/state/posture` | `unknown`, `standing_up`, `standing`, `standing_down`, or `down` |
-| `{robot_key}/state/health` | Node status and safety flags |
+The node publishes and answers `get` on `{robot_key}/state`. The snapshot keeps
+robot-derived State separate from requested commands and the latest SDK
+diagnostic. It reports the V2.0 motion state machine separately from the coarse
+sport mode and exposes one `accepting_commands` value for DDS-backed command
+intake. A command name is never presented as a physical posture.
 
-Velocity state example:
+## Keyboard controls
 
-```json
-{"vx":0.5,"vy":0.0,"vyaw":0.2}
-```
-
-Health state example:
-
-```json
-{
-  "status": "ready",
-  "walking_enabled": true,
-  "watchdog_triggered": false,
-  "last_error": null
-}
-```
-
-`applied` is derived from successful SDK return codes. It is not physical
-velocity or posture feedback from robot telemetry.
-
-## Pygame controls
-
-Shift is the motion deadman and is also required for posture commands.
+Shift is the motion deadman and is also required for posture requests.
 
 | Input | Action |
 | --- | --- |
-| `Shift+W` / `Shift+S` | Positive / negative `vx` |
-| `Shift+A` / `Shift+D` | Positive / negative `vy` |
-| `Shift+Q` / `Shift+E` | Positive / negative `vyaw` |
-| `Shift+R` | Stand and enter walkable balance mode |
-| `Shift+F` | Go down with `StandDown()` |
-| `Space` | Publish zero velocity immediately |
-| Release `Shift` | Publish zero velocity immediately |
-| Window loses focus | Publish zero, cancel pending stand retries, and require Shift release before any motion or posture command re-arms |
-| `Esc` or close window | Publish zero velocity and exit |
+| `Shift+W/S` | positive / negative `vx` |
+| `Shift+A/D` | positive / negative `vy` |
+| `Shift+Q/E` | positive / negative `vyaw` |
+| `Shift+R` | publish Stand once |
+| `Shift+F` | publish Down once |
+| `Space` | publish zero velocity |
+| release Shift / lose focus | publish zero velocity |
+| `Esc` / close | publish zero velocity and exit |
 
-Multiple motion axes may be held simultaneously. The keyboard node ramps toward
-its configured targets, publishes at 20 Hz, and displays requested/applied
-velocity, posture, walking enablement, watchdog state, health, and deadman state.
-Velocity uses best-effort/drop QoS. Stand/down uses a separate reliable/blocking
-publisher on the same command key and retries until the reported target posture
-is observed in a state sample newer than the request, or the configured timeout
-is shown as an operator error. Losing focus, releasing Shift, or exiting cancels
-pending `stand` retries; an already-requested safety `down` remains eligible for
-retry while the keyboard node continues running.
+## Validate
 
-## Development checks
-
-These checks require no robot hardware:
+Without starting the robot node:
 
 ```bash
 uv run ruff format --check .
@@ -242,4 +204,6 @@ uv run pyright
 uv run python -m unittest discover -s tests -v
 ```
 
-Passing them does not replace a controlled on-robot smoke test.
+Hardware acceptance still requires a supported test of down startup, Stand,
+slow walking, Down, re-Stand, and shutdown while recording full State and SDK
+diagnostics.

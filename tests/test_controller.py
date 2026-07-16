@@ -1,432 +1,455 @@
 from __future__ import annotations
 
 import unittest
-from dataclasses import dataclass, field
-from math import inf, nan
 
-from controller import ControllerTiming, RobotController
-from models import (
-    HealthState,
-    NodeStatus,
-    Posture,
+from controller import (
+    CommandBuffer,
+    Controller,
+    Go2MotionStateMachine,
+    Go2SportMode,
+    Lifecycle,
+    Motion,
+    NodeState,
     PostureCommand,
-    PostureState,
+    PostureTarget,
+    RobotObservation,
+    RobotState,
+    SdkCommand,
+    UnknownReason,
     VelocityCommand,
-    VelocityState,
+    classify_state,
 )
 
 
-@dataclass
-class FakeSportClient:
-    calls: list[tuple[object, ...]] = field(default_factory=list)
-    return_codes: dict[str, int | list[int]] = field(default_factory=dict)
+class Clock:
+    def __init__(self, value: float = 1.0) -> None:
+        self.value = value
 
-    def _call(self, name: str, *arguments: float) -> int:
-        self.calls.append((name, *arguments))
-        configured = self.return_codes.get(name, 0)
-        if isinstance(configured, list):
-            return configured.pop(0) if configured else 0
-        return configured
+    def __call__(self) -> float:
+        return self.value
 
-    def Move(self, vx: float, vy: float, vyaw: float) -> int:
-        return self._call("Move", vx, vy, vyaw)
+    def advance(self, seconds: float = 0.01) -> None:
+        self.value += seconds
 
-    def StopMove(self) -> int:
-        return self._call("StopMove")
+
+class FakeClient:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, ...]] = []
+        self.stop_code = 0
 
     def StandUp(self) -> int:
-        return self._call("StandUp")
+        self.calls.append(("StandUp",))
+        return 0
 
-    def StandDown(self) -> int:
-        return self._call("StandDown")
+    def RecoveryStand(self) -> int:
+        self.calls.append(("RecoveryStand",))
+        return 0
 
     def BalanceStand(self) -> int:
-        return self._call("BalanceStand")
+        self.calls.append(("BalanceStand",))
+        return 0
+
+    def StopMove(self) -> int:
+        self.calls.append(("StopMove",))
+        return self.stop_code
+
+    def StandDown(self) -> int:
+        self.calls.append(("StandDown",))
+        return 0
+
+    def Move(self, vx: float, vy: float, vyaw: float) -> int:
+        self.calls.append(("Move", vx, vy, vyaw))
+        return 0
 
 
-@dataclass
-class FakeStateSink:
-    requested: list[VelocityState] = field(default_factory=list)
-    applied: list[VelocityState] = field(default_factory=list)
-    postures: list[PostureState] = field(default_factory=list)
-    health: list[HealthState] = field(default_factory=list)
+class StateRecorder:
+    def __init__(self) -> None:
+        self.states: list[NodeState] = []
 
-    def publish_requested(self, state: VelocityState) -> None:
-        self.requested.append(state)
-
-    def publish_applied(self, state: VelocityState) -> None:
-        self.applied.append(state)
-
-    def publish_posture(self, state: PostureState) -> None:
-        self.postures.append(state)
-
-    def publish_health(self, state: HealthState) -> None:
-        self.health.append(state)
+    def publish(self, state: NodeState) -> None:
+        self.states.append(state)
 
 
-class FailingStateSink(FakeStateSink):
-    @staticmethod
-    def _fail() -> None:
-        raise RuntimeError("Zenoh unavailable")
-
-    def publish_requested(self, state: VelocityState) -> None:
-        self._fail()
-
-    def publish_applied(self, state: VelocityState) -> None:
-        self._fail()
-
-    def publish_posture(self, state: PostureState) -> None:
-        self._fail()
-
-    def publish_health(self, state: HealthState) -> None:
-        self._fail()
-
-
-TIMING = ControllerTiming(
-    command_timeout_seconds=0.25,
-    posture_transition_seconds=3.0,
-    shutdown_stop_delay_seconds=1.0,
-    stop_retry_interval_seconds=0.25,
-)
-
-
-class RobotControllerTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.client = FakeSportClient()
-        self.sink = FakeStateSink()
-        self.sleeps: list[float] = []
-        self.controller = RobotController(
+class Harness:
+    def __init__(self) -> None:
+        self.clock = Clock()
+        self.client = FakeClient()
+        self.commands = CommandBuffer()
+        self.states = StateRecorder()
+        self.controller = Controller(
             self.client,
-            self.sink,
-            TIMING,
-            clock=lambda: 0.0,
-            sleep=self.sleeps.append,
+            self.commands,
+            self.states,
+            maximum_state_age_seconds=0.2,
+            linear_velocity_quiescent_threshold=0.03,
+            yaw_speed_quiescent_threshold=0.05,
+            velocity_deadman_seconds=0.25,
+            clock=self.clock,
         )
 
-    def send(self, command: VelocityCommand | PostureCommand, *, now: float) -> bool:
-        return self.controller.handle_command(
-            command,
-            received_at=now,
-            now=now,
-        )
+    @property
+    def latest(self) -> NodeState:
+        return self.states.states[-1]
 
-    def stand(self) -> None:
-        self.assertTrue(self.controller.startup())
-        self.assertTrue(self.send(PostureCommand(posture="stand"), now=1.0))
-        self.controller.tick(now=3.999)
-        self.assertEqual(self.controller.posture.posture, Posture.STANDING_UP)
-        self.controller.tick(now=4.0)
-        self.assertEqual(self.controller.posture.posture, Posture.STANDING)
-
-    def test_startup_stops_motion_and_requires_explicit_stand(self) -> None:
-        self.assertTrue(self.controller.startup())
-
-        self.assertEqual(self.client.calls, [("StopMove",)])
-        self.assertEqual(self.controller.posture.posture, Posture.UNKNOWN)
-        self.assertFalse(self.controller.health.walking_enabled)
-        self.assertEqual(self.controller.health.status, NodeStatus.READY)
-
-        accepted = self.send(
-            VelocityCommand(vx=0.5, vy=0.0, vyaw=0.0),
-            now=0.1,
-        )
-        self.assertFalse(accepted)
-        self.assertNotIn(("Move", 0.5, 0.0, 0.0), self.client.calls)
-        self.assertEqual(self.controller.requested.vx, 0.5)
-
-    def test_startup_retries_failed_stop_and_remains_non_walkable(self) -> None:
-        self.client.return_codes["StopMove"] = [6, 0]
-
-        self.assertFalse(self.controller.startup())
-        self.assertEqual(self.controller.health.status, NodeStatus.DEGRADED)
-        self.assertFalse(self.controller.health.walking_enabled)
-        self.controller.tick(now=0.24)
-        self.assertEqual(self.client.calls, [("StopMove",)])
-
-        self.controller.tick(now=0.25)
-
-        self.assertEqual(self.client.calls, [("StopMove",), ("StopMove",)])
-        self.assertEqual(self.controller.health.status, NodeStatus.READY)
-        self.assertFalse(self.controller.health.walking_enabled)
-        self.assertEqual(self.controller.posture.posture, Posture.UNKNOWN)
-
-    def test_controller_timing_rejects_non_finite_values(self) -> None:
-        for value in (nan, inf):
-            with self.subTest(value=value), self.assertRaises(ValueError):
-                ControllerTiming(
-                    command_timeout_seconds=value,
-                    posture_transition_seconds=3.0,
-                    shutdown_stop_delay_seconds=1.0,
-                )
-
-    def test_stand_waits_then_enters_balance_mode_before_walking(self) -> None:
-        self.stand()
-
-        self.assertEqual(
-            self.client.calls,
-            [("StopMove",), ("StopMove",), ("StandUp",), ("BalanceStand",)],
-        )
-        self.assertTrue(self.controller.health.walking_enabled)
-
-        accepted = self.send(
-            VelocityCommand(vx=0.5, vy=-0.2, vyaw=0.3),
-            now=4.1,
-        )
-        self.assertTrue(accepted)
-        self.assertEqual(self.client.calls[-1], ("Move", 0.5, -0.2, 0.3))
-        self.assertEqual(self.controller.applied.vx, 0.5)
-
-    def test_repeated_stand_during_transition_is_idempotent(self) -> None:
-        self.assertTrue(self.controller.startup())
-        stand = PostureCommand(posture="stand")
-        self.assertTrue(self.send(stand, now=1.0))
-        calls_after_first_request = self.client.calls.copy()
-
-        self.assertTrue(self.send(stand, now=2.0))
-
-        self.assertEqual(self.client.calls, calls_after_first_request)
-        self.controller.tick(now=4.0)
-        self.assertEqual(self.controller.posture.posture, Posture.STANDING)
-
-    def test_stand_delay_begins_after_stand_up_returns(self) -> None:
-        controller = RobotController(
-            self.client,
-            self.sink,
-            TIMING,
-            clock=lambda: 10.0,
-            sleep=self.sleeps.append,
-        )
-        self.assertTrue(controller.startup())
-
-        self.assertTrue(
-            controller.handle_command(
-                PostureCommand(posture="stand"),
-                received_at=1.0,
-                now=1.0,
+    def state(
+        self,
+        mode: Go2SportMode,
+        *,
+        vx: float = 0.0,
+        yaw_speed: float = 0.0,
+        state_machine_code: int | None = None,
+        received_at: float | None = None,
+    ) -> None:
+        if state_machine_code is None:
+            state_machine_code = {
+                Go2SportMode.IDLE: Go2MotionStateMachine.AGILE,
+                Go2SportMode.BALANCE_STAND: Go2MotionStateMachine.BALANCE_STANDING,
+                Go2SportMode.LOCOMOTION: Go2MotionStateMachine.AGILE,
+                Go2SportMode.LIE_DOWN: Go2MotionStateMachine.CROUCH,
+            }.get(mode, Go2MotionStateMachine.AGILE)
+        self.controller.on_state(
+            RobotObservation(
+                received_at=self.clock() if received_at is None else received_at,
+                stamp_sec=10,
+                stamp_nanosec=20,
+                state_machine_code=state_machine_code,
+                mode=mode,
+                velocity=(vx, 0.0, 0.0),
+                yaw_speed=yaw_speed,
             )
         )
-        controller.tick(now=12.999)
-        self.assertEqual(controller.posture.posture, Posture.STANDING_UP)
-        controller.tick(now=13.0)
-        self.assertEqual(controller.posture.posture, Posture.STANDING)
 
-    def test_stale_velocity_is_recorded_but_not_forwarded(self) -> None:
-        self.stand()
+    def next_state(self, mode: Go2SportMode, **kwargs: object) -> None:
+        self.clock.advance()
+        self.state(mode, **kwargs)  # type: ignore[arg-type]
 
-        accepted = self.controller.handle_command(
-            VelocityCommand(vx=0.4, vy=0.0, vyaw=0.0),
-            received_at=4.0,
-            now=4.3,
+    def posture(self, posture: str) -> bool:
+        return self.commands.update_posture(
+            PostureCommand(posture=PostureTarget(posture))
         )
 
-        self.assertFalse(accepted)
-        self.assertEqual(self.controller.requested.vx, 0.4)
-        self.assertNotIn(("Move", 0.4, 0.0, 0.0), self.client.calls)
-        self.assertIn("stale velocity", self.controller.health.last_error or "")
+    def velocity(self, vx: float, vy: float = 0.0, vyaw: float = 0.0) -> bool:
+        return self.commands.update_velocity(
+            VelocityCommand(vx=vx, vy=vy, vyaw=vyaw),
+            received_at=self.clock(),
+        )
 
-    def test_watchdog_stops_once_and_fresh_velocity_resumes(self) -> None:
-        self.stand()
-        command = VelocityCommand(vx=0.4, vy=0.0, vyaw=0.0)
-        self.assertTrue(self.send(command, now=4.0))
 
-        self.controller.tick(now=4.249)
-        self.assertEqual(self.client.calls[-1], ("Move", 0.4, 0.0, 0.0))
-        self.controller.tick(now=4.25)
-        self.assertEqual(self.client.calls[-1], ("StopMove",))
-        self.assertTrue(self.controller.health.watchdog_triggered)
-        self.assertTrue(self.controller.health.walking_enabled)
-        watchdog_call_count = self.client.calls.count(("StopMove",))
+class ControllerTests(unittest.TestCase):
+    def test_classifier_is_one_direct_observation_table(self) -> None:
+        fsm = Go2MotionStateMachine
+        mode = Go2SportMode
+        cases = (
+            (fsm.DAMPING, mode.IDLE, 0.1, RobotState.DAMPING),
+            (fsm.CROUCH, mode.LIE_DOWN, 0.0, RobotState.DOWN),
+            (fsm.ALTERNATE_CROUCH, mode.LIE_DOWN, 0.0, RobotState.DOWN),
+            (fsm.CROUCH, mode.LIE_DOWN, 0.1, RobotState.UNSUPPORTED),
+            (fsm.STANDING_LOCK, mode.IDLE, 0.1, RobotState.LOCKED_STAND),
+            (fsm.AGILE, mode.IDLE, 0.1, RobotState.READY_STAND),
+            (fsm.AGILE, mode.BALANCE_STAND, 0.1, RobotState.READY_STAND),
+            (fsm.BALANCE_STANDING, mode.BALANCE_STAND, 0.1, RobotState.READY_STAND),
+            (fsm.AGILE, mode.LOCOMOTION, 0.1, RobotState.LOCOMOTION),
+            (fsm.BALANCE_STANDING, mode.LOCOMOTION, 0.1, RobotState.LOCOMOTION),
+            (fsm.SIT, mode.IDLE, 0.0, RobotState.UNSUPPORTED),
+            (0, mode.IDLE, 0.0, RobotState.UNSUPPORTED),
+        )
 
-        self.controller.tick(now=5.0)
-        self.assertEqual(self.client.calls.count(("StopMove",)), watchdog_call_count)
+        for machine, sport_mode, vx, expected in cases:
+            with self.subTest(machine=machine, mode=sport_mode, vx=vx):
+                state = classify_state(
+                    RobotObservation(
+                        received_at=1.0,
+                        stamp_sec=2,
+                        stamp_nanosec=3,
+                        state_machine_code=machine,
+                        mode=sport_mode,
+                        velocity=(vx, 0.0, 0.0),
+                        yaw_speed=0.0,
+                    ),
+                    linear_velocity_quiescent_threshold=0.03,
+                    yaw_speed_quiescent_threshold=0.05,
+                )
+                self.assertEqual(state.state, expected)
+                self.assertEqual(
+                    state.motion,
+                    Motion.MOVING if vx > 0.03 else Motion.QUIESCENT,
+                )
 
-        self.assertTrue(self.send(command, now=5.01))
-        self.assertEqual(self.client.calls[-1], ("Move", 0.4, 0.0, 0.0))
-        self.assertFalse(self.controller.health.watchdog_triggered)
+    def test_command_gate_depends_on_fresh_dds_not_robot_state(self) -> None:
+        harness = Harness()
+        self.assertFalse(harness.velocity(0.5))
 
-    def test_failed_watchdog_stop_retries_until_confirmed(self) -> None:
-        self.stand()
-        command = VelocityCommand(vx=0.2, vy=0.0, vyaw=0.0)
-        self.assertTrue(self.send(command, now=4.0))
-        self.client.return_codes["StopMove"] = [9, 0]
+        harness.state(Go2SportMode.IDLE, state_machine_code=0)
+        self.assertTrue(harness.latest.connected)
+        self.assertEqual(harness.latest.robot.state, RobotState.UNSUPPORTED)
+        self.assertTrue(harness.latest.accepting_commands)
+        self.assertTrue(harness.velocity(0.5))
 
-        self.controller.tick(now=4.25)
+        harness.next_state(Go2SportMode.IDLE, state_machine_code=0)
+        self.assertIsNone(harness.latest.requested_velocity)
+        self.assertEqual(harness.client.calls, [])
+        self.assertTrue(harness.latest.accepting_commands)
 
-        self.assertEqual(self.controller.applied.vx, 0.2)
-        self.assertFalse(self.controller.health.walking_enabled)
-        self.assertTrue(self.controller.health.watchdog_triggered)
-        self.controller.tick(now=4.49)
-        self.assertEqual(self.client.calls.count(("StopMove",)), 3)
+    def test_200_ms_state_gap_disconnects_and_clears_commands(self) -> None:
+        harness = Harness()
+        harness.state(Go2SportMode.IDLE)
+        self.assertTrue(harness.velocity(0.5))
 
-        self.controller.tick(now=4.5)
+        harness.clock.advance(0.2)
+        self.assertTrue(harness.controller.expire_state())
+        self.assertFalse(harness.latest.connected)
+        self.assertEqual(harness.latest.robot.state, RobotState.UNKNOWN)
+        self.assertEqual(harness.latest.robot.reason, UnknownReason.STALE)
+        self.assertFalse(harness.latest.accepting_commands)
+        self.assertIsNone(harness.latest.requested_velocity)
+        self.assertFalse(harness.velocity(0.5))
 
-        self.assertEqual(self.client.calls.count(("StopMove",)), 4)
-        self.assertEqual(self.controller.applied, VelocityState())
-        self.assertTrue(self.controller.health.walking_enabled)
-        self.assertTrue(self.controller.health.watchdog_triggered)
+        harness.next_state(Go2SportMode.IDLE)
+        self.assertTrue(harness.latest.connected)
+        self.assertTrue(harness.latest.accepting_commands)
 
-    def test_move_failure_stops_motion_without_claiming_watchdog(self) -> None:
-        self.stand()
-        self.assertTrue(self.send(VelocityCommand(vx=0.4, vy=0.0, vyaw=0.0), now=4.0))
-        self.client.return_codes["Move"] = 8
+    def test_invalid_sample_does_not_refresh_freshness(self) -> None:
+        harness = Harness()
+        harness.controller.reject_state("bad startup sample")
+        self.assertEqual(harness.latest.robot.reason, UnknownReason.INVALID_SAMPLE)
+        self.assertFalse(harness.controller.has_state)
 
-        self.assertFalse(self.send(VelocityCommand(vx=0.2, vy=0.0, vyaw=0.0), now=4.1))
+        harness.state(Go2SportMode.IDLE)
+        harness.clock.advance(0.19)
+        harness.controller.reject_state("bad later sample")
+        self.assertTrue(harness.latest.connected)
 
+        harness.clock.advance(0.01)
+        self.assertTrue(harness.controller.expire_state())
+        self.assertFalse(harness.latest.connected)
+
+    def test_moving_agile_accepts_and_executes_latest_velocity(self) -> None:
+        harness = Harness()
+        harness.state(Go2SportMode.IDLE, vx=0.1)
+        self.assertEqual(harness.latest.robot.state, RobotState.READY_STAND)
+        self.assertTrue(harness.velocity(0.5))
+        self.assertTrue(harness.velocity(1.0, 0.2, -0.3))
+        self.assertEqual(harness.client.calls, [])
+
+        harness.next_state(Go2SportMode.IDLE, vx=0.2)
+        self.assertEqual(harness.client.calls, [("Move", 1.0, 0.2, -0.3)])
+        self.assertTrue(harness.latest.accepting_commands)
+
+    def test_velocity_illegal_in_current_state_is_not_delayed(self) -> None:
+        harness = Harness()
+        harness.state(
+            Go2SportMode.IDLE,
+            state_machine_code=Go2MotionStateMachine.STANDING_LOCK,
+        )
+        self.assertTrue(harness.velocity(0.5))
+        harness.next_state(
+            Go2SportMode.IDLE,
+            state_machine_code=Go2MotionStateMachine.STANDING_LOCK,
+        )
+        self.assertIsNone(harness.latest.requested_velocity)
+
+        harness.next_state(Go2SportMode.IDLE)
+        self.assertEqual(harness.client.calls, [])
+
+    def test_stand_action_is_selected_only_from_observed_state(self) -> None:
+        cases = (
+            (
+                Go2SportMode.LIE_DOWN,
+                Go2MotionStateMachine.CROUCH,
+                "StandUp",
+            ),
+            (
+                Go2SportMode.IDLE,
+                Go2MotionStateMachine.DAMPING,
+                "RecoveryStand",
+            ),
+            (
+                Go2SportMode.IDLE,
+                Go2MotionStateMachine.STANDING_LOCK,
+                "BalanceStand",
+            ),
+            (
+                Go2SportMode.LOCOMOTION,
+                Go2MotionStateMachine.AGILE,
+                "BalanceStand",
+            ),
+        )
+        for sport_mode, machine, expected in cases:
+            with self.subTest(machine=machine):
+                harness = Harness()
+                harness.state(sport_mode, state_machine_code=machine)
+                self.assertTrue(harness.posture("stand"))
+                harness.next_state(sport_mode, state_machine_code=machine)
+                self.assertEqual(harness.client.calls, [(expected,)])
+                self.assertEqual(harness.latest.robot.state, RobotState.UNKNOWN)
+                self.assertFalse(harness.latest.accepting_commands)
+
+        ready = Harness()
+        ready.state(Go2SportMode.IDLE)
+        self.assertTrue(ready.posture("stand"))
+        ready.next_state(Go2SportMode.IDLE)
+        self.assertEqual(ready.client.calls, [])
+        self.assertIsNone(ready.latest.requested_posture)
+
+    def test_stand_workflow_advances_from_each_new_observation(self) -> None:
+        harness = Harness()
+        harness.state(Go2SportMode.LIE_DOWN)
+        self.assertTrue(harness.posture("stand"))
+        harness.next_state(Go2SportMode.LIE_DOWN)
+        self.assertEqual(harness.client.calls, [("StandUp",)])
+
+        harness.next_state(
+            Go2SportMode.IDLE,
+            state_machine_code=Go2MotionStateMachine.STANDING_LOCK,
+        )
+        self.assertEqual(harness.client.calls, [("StandUp",), ("BalanceStand",)])
+
+        harness.next_state(Go2SportMode.IDLE)
+        self.assertIsNone(harness.latest.requested_posture)
+        self.assertTrue(harness.latest.accepting_commands)
+
+    def test_posture_rpc_requires_state_received_after_rpc_return(self) -> None:
+        harness = Harness()
+        harness.state(Go2SportMode.LIE_DOWN)
+        self.assertTrue(harness.posture("stand"))
+        harness.next_state(Go2SportMode.LIE_DOWN)
+        rpc_returned_at = harness.clock()
+
+        harness.state(
+            Go2SportMode.IDLE,
+            state_machine_code=Go2MotionStateMachine.STANDING_LOCK,
+            received_at=rpc_returned_at,
+        )
+        self.assertEqual(harness.latest.robot.state, RobotState.UNKNOWN)
+        self.assertEqual(harness.client.calls, [("StandUp",)])
+
+        harness.next_state(
+            Go2SportMode.IDLE,
+            state_machine_code=Go2MotionStateMachine.STANDING_LOCK,
+        )
+        self.assertEqual(harness.client.calls, [("StandUp",), ("BalanceStand",)])
+
+    def test_down_stops_once_then_waits_for_quiescent_state(self) -> None:
+        harness = Harness()
+        harness.client.stop_code = -1
+        harness.state(Go2SportMode.IDLE)
+        self.assertTrue(harness.posture("down"))
+
+        harness.next_state(Go2SportMode.IDLE)
+        self.assertEqual(harness.client.calls, [("StopMove",)])
+        self.assertEqual(harness.latest.last_sdk.code, -1)  # type: ignore[union-attr]
+
+        harness.next_state(Go2SportMode.IDLE, vx=0.2)
+        self.assertEqual(harness.client.calls, [("StopMove",)])
+        self.assertEqual(harness.latest.robot.state, RobotState.READY_STAND)
+
+        harness.next_state(Go2SportMode.IDLE)
         self.assertEqual(
-            self.client.calls[-2:],
-            [("Move", 0.2, 0.0, 0.0), ("StopMove",)],
+            harness.client.calls,
+            [("StopMove",), ("StandDown",)],
         )
-        self.assertFalse(self.controller.health.watchdog_triggered)
-        self.assertEqual(self.controller.health.status, NodeStatus.DEGRADED)
-        self.assertEqual(self.controller.applied, VelocityState())
 
-    def test_failed_move_stop_is_retried_and_inhibits_velocity(self) -> None:
-        self.stand()
-        self.client.return_codes["Move"] = 8
-        self.client.return_codes["StopMove"] = [9, 0]
+        harness.next_state(Go2SportMode.LIE_DOWN)
+        self.assertIsNone(harness.latest.requested_posture)
+        self.assertTrue(harness.latest.accepting_commands)
 
-        self.assertFalse(self.send(VelocityCommand(vx=0.2, vy=0.0, vyaw=0.0), now=4.0))
-        move_count = sum(call[0] == "Move" for call in self.client.calls)
-        self.assertFalse(self.send(VelocityCommand(vx=0.3, vy=0.0, vyaw=0.0), now=4.1))
+    def test_damping_never_completes_down_and_stand_can_replace_it(self) -> None:
+        harness = Harness()
+        harness.state(Go2SportMode.IDLE)
+        self.assertTrue(harness.posture("down"))
+        harness.next_state(Go2SportMode.IDLE)
+
+        harness.next_state(
+            Go2SportMode.IDLE,
+            state_machine_code=Go2MotionStateMachine.DAMPING,
+        )
+        self.assertEqual(harness.latest.requested_posture, PostureTarget.DOWN)
+        self.assertTrue(harness.latest.accepting_commands)
+
+        self.assertTrue(harness.posture("stand"))
+        harness.next_state(
+            Go2SportMode.IDLE,
+            state_machine_code=Go2MotionStateMachine.DAMPING,
+        )
         self.assertEqual(
-            sum(call[0] == "Move" for call in self.client.calls), move_count
+            harness.client.calls,
+            [("StopMove",), ("RecoveryStand",)],
         )
 
-        self.controller.tick(now=4.25)
+    def test_latest_posture_replaces_older_and_has_velocity_priority(self) -> None:
+        harness = Harness()
+        harness.state(Go2SportMode.LIE_DOWN)
+        self.assertTrue(harness.posture("stand"))
+        self.assertTrue(harness.posture("down"))
+        harness.next_state(Go2SportMode.LIE_DOWN)
+        self.assertEqual(harness.client.calls, [])
+        self.assertIsNone(harness.latest.requested_posture)
 
-        self.assertEqual(self.controller.applied, VelocityState())
-        self.assertTrue(self.controller.health.walking_enabled)
-        self.assertFalse(self.controller.health.watchdog_triggered)
+        moving = Harness()
+        moving.state(Go2SportMode.IDLE)
+        self.assertTrue(moving.velocity(1.0))
+        self.assertTrue(moving.posture("down"))
+        self.assertTrue(moving.velocity(2.0))
+        moving.next_state(Go2SportMode.IDLE)
+        self.assertEqual(moving.client.calls, [("StopMove",)])
+        self.assertIsNone(moving.latest.requested_velocity)
 
-    def test_down_stops_before_stand_down_and_ignores_velocity(self) -> None:
-        self.stand()
-        self.assertTrue(self.send(VelocityCommand(vx=0.2, vy=0.0, vyaw=0.0), now=4.1))
-        self.assertTrue(self.send(PostureCommand(posture="down"), now=4.2))
+    def test_velocity_deadman_sends_one_zero_without_closing_input(self) -> None:
+        harness = Harness()
+        harness.state(Go2SportMode.IDLE)
+        self.assertTrue(harness.velocity(1.0))
+        harness.clock.advance(0.19)
+        harness.state(Go2SportMode.IDLE)
+        self.assertEqual(harness.client.calls, [("Move", 1.0, 0.0, 0.0)])
 
-        self.assertEqual(self.client.calls[-2:], [("StopMove",), ("StandDown",)])
-        self.assertEqual(self.controller.posture.posture, Posture.DOWN)
-        self.assertFalse(self.controller.health.walking_enabled)
-
-        move_count = sum(call[0] == "Move" for call in self.client.calls)
-        self.assertFalse(self.send(VelocityCommand(vx=0.3, vy=0.0, vyaw=0.0), now=4.3))
+        harness.clock.advance(0.06)
+        harness.state(Go2SportMode.IDLE)
         self.assertEqual(
-            sum(call[0] == "Move" for call in self.client.calls), move_count
+            harness.client.calls,
+            [("Move", 1.0, 0.0, 0.0), ("Move", 0.0, 0.0, 0.0)],
         )
+        self.assertIsNone(harness.latest.requested_velocity)
+        self.assertTrue(harness.latest.accepting_commands)
 
-    def test_down_retries_failed_stop_before_stand_down(self) -> None:
-        self.stand()
-        self.client.return_codes["StopMove"] = [6, 0]
+        harness.next_state(Go2SportMode.IDLE)
+        self.assertEqual(len(harness.client.calls), 2)
 
-        self.assertFalse(self.send(PostureCommand(posture="down"), now=4.1))
+    def test_shutdown_uses_same_down_workflow_and_requires_observed_down(self) -> None:
+        harness = Harness()
+        harness.state(Go2SportMode.IDLE)
+        harness.controller.begin_shutdown()
+        self.assertEqual(harness.latest.lifecycle, Lifecycle.SHUTTING_DOWN)
+        self.assertFalse(harness.latest.accepting_commands)
 
-        self.assertEqual(self.client.calls[-1], ("StopMove",))
-        self.assertNotEqual(self.client.calls[-1], ("StandDown",))
-        self.assertEqual(self.controller.posture.posture, Posture.STANDING_DOWN)
-        self.assertEqual(self.controller.health.status, NodeStatus.DEGRADED)
-
-        self.controller.tick(now=4.34)
-        self.assertNotEqual(self.client.calls[-1], ("StandDown",))
-        self.controller.tick(now=4.35)
-
-        self.assertEqual(self.client.calls[-2:], [("StopMove",), ("StandDown",)])
-        self.assertEqual(self.controller.posture.posture, Posture.DOWN)
-        self.assertFalse(self.controller.health.walking_enabled)
-
-    def test_repeated_down_after_success_is_idempotent(self) -> None:
-        self.stand()
-        down = PostureCommand(posture="down")
-        self.assertTrue(self.send(down, now=4.1))
-        calls_after_first_request = self.client.calls.copy()
-
-        self.assertTrue(self.send(down, now=4.2))
-
-        self.assertEqual(self.client.calls, calls_after_first_request)
-
-    def test_failed_balance_keeps_velocity_disabled(self) -> None:
-        self.client.return_codes["BalanceStand"] = 7
-        self.assertTrue(self.controller.startup())
-        self.assertTrue(self.send(PostureCommand(posture="stand"), now=1.0))
-
-        self.controller.tick(now=4.0)
-
-        self.assertEqual(self.controller.posture.posture, Posture.UNKNOWN)
-        self.assertFalse(self.controller.health.walking_enabled)
-        self.assertEqual(self.controller.health.status, NodeStatus.DEGRADED)
-        self.assertIn("BalanceStand failed", self.controller.health.last_error or "")
-
-    def test_graceful_shutdown_stops_waits_then_stands_down(self) -> None:
-        self.stand()
-
-        self.controller.graceful_shutdown()
-
-        self.assertEqual(self.sleeps, [1.0])
-        self.assertEqual(self.client.calls[-2:], [("StopMove",), ("StandDown",)])
-        self.assertEqual(self.controller.posture.posture, Posture.DOWN)
-        self.assertEqual(self.controller.health.status, NodeStatus.STOPPING)
-        self.assertFalse(self.controller.health.walking_enabled)
-
-    def test_shutdown_retries_stop_once_before_stand_down(self) -> None:
-        self.stand()
-        self.client.return_codes["StopMove"] = [6, 0]
-
-        self.controller.graceful_shutdown()
-
+        harness.next_state(Go2SportMode.IDLE)
+        harness.next_state(Go2SportMode.IDLE)
+        self.assertFalse(harness.controller.shutdown_complete)
+        harness.next_state(
+            Go2SportMode.IDLE,
+            state_machine_code=Go2MotionStateMachine.DAMPING,
+        )
+        self.assertFalse(harness.controller.shutdown_complete)
+        harness.next_state(Go2SportMode.LIE_DOWN)
+        self.assertTrue(harness.controller.shutdown_complete)
         self.assertEqual(
-            self.client.calls[-3:],
-            [("StopMove",), ("StopMove",), ("StandDown",)],
-        )
-        self.assertEqual(self.controller.posture.posture, Posture.DOWN)
-
-    def test_shutdown_never_stands_down_after_unconfirmed_stop(self) -> None:
-        self.stand()
-        self.client.return_codes["StopMove"] = 6
-
-        self.controller.graceful_shutdown()
-
-        self.assertEqual(self.client.calls[-2:], [("StopMove",), ("StopMove",)])
-        self.assertNotEqual(self.client.calls[-1], ("StandDown",))
-        self.assertEqual(self.controller.posture.posture, Posture.UNKNOWN)
-        self.assertEqual(self.controller.health.status, NodeStatus.STOPPING)
-
-    def test_shutdown_completes_safe_sequence_if_sleep_is_interrupted(self) -> None:
-        self.stand()
-        controller = RobotController(
-            self.client,
-            self.sink,
-            TIMING,
-            sleep=lambda _delay: (_ for _ in ()).throw(KeyboardInterrupt()),
-        )
-        self.assertTrue(controller.startup())
-
-        with self.assertRaises(KeyboardInterrupt):
-            controller.graceful_shutdown()
-
-        self.assertEqual(self.client.calls[-2:], [("StopMove",), ("StandDown",)])
-        self.assertEqual(controller.posture.posture, Posture.DOWN)
-
-    def test_state_publication_failure_cannot_abort_shutdown(self) -> None:
-        controller = RobotController(
-            self.client,
-            FailingStateSink(),
-            TIMING,
-            sleep=self.sleeps.append,
-        )
-        with self.assertLogs("controller", level="ERROR"):
-            self.assertTrue(controller.startup())
-            controller.graceful_shutdown()
-
-        self.assertEqual(self.client.calls[-2:], [("StopMove",), ("StandDown",)])
-        self.assertEqual(self.sleeps, [1.0])
-
-    def test_state_publication_failure_cannot_abort_heartbeat(self) -> None:
-        controller = RobotController(
-            self.client,
-            FailingStateSink(),
-            TIMING,
+            harness.client.calls,
+            [("StopMove",), ("StandDown",)],
         )
 
-        with self.assertLogs("controller", level="ERROR"):
-            controller.publish_state()
+    def test_public_state_keeps_sdk_result_separate_from_robot_state(self) -> None:
+        harness = Harness()
+        harness.client.stop_code = -1
+        harness.state(Go2SportMode.IDLE)
+        self.assertTrue(harness.posture("down"))
+        harness.next_state(Go2SportMode.IDLE)
+
+        self.assertEqual(harness.latest.robot.state, RobotState.UNKNOWN)
+        self.assertEqual(harness.latest.posture_action, SdkCommand.STOP_MOVE)
+        diagnostic = harness.latest.last_sdk
+        self.assertIsNotNone(diagnostic)
+        assert diagnostic is not None
+        self.assertEqual(diagnostic.code, -1)
+        self.assertIsNone(harness.latest.last_error)
 
 
 if __name__ == "__main__":

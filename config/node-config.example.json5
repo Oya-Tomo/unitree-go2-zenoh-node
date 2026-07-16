@@ -1,19 +1,24 @@
 {
-  // Every node controls one robot through one network interface.
+  // Every node controls exactly one Go2 through one dedicated interface.
   robot_key: "unitree/go2",
-  // Republish the current state so clients can detect a dead or disconnected node.
   state_heartbeat_seconds: 1.0,
 
   dds: {
     domain_id: 0,
     network_interface: "enp2s0",
-    // Bounds each SDK request phase; synchronous calls still block the control loop.
     rpc_timeout_seconds: 0.2,
+    sport_mode_state_topic: "rt/sportmodestate",
   },
 
-  safety: {
-    command_timeout_seconds: 0.25,
-    posture_transition_seconds: 3.0,
-    shutdown_stop_delay_seconds: 1.0,
+  state: {
+    startup_timeout_seconds: 1.0,
+    maximum_age_seconds: 0.2,
+    linear_velocity_quiescent_threshold: 0.03,
+    yaw_speed_quiescent_threshold: 0.05,
+  },
+
+  control: {
+    velocity_deadman_seconds: 0.25,
+    shutdown_timeout_seconds: 5.0,
   },
 }
