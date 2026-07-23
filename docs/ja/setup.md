@@ -9,7 +9,8 @@
 - pygame keyboard controllerを表示するdesktop環境
 - Go2の無線remoteと確認済みの緊急停止手順
 
-このnodeはUnitreeのhigh-level SportClient APIを使います。同じhigh-level serviceを別processが操作している状態では起動しないでください。
+このnodeはUnitreeのhigh-level SportClient APIを使います。
+同じhigh-level serviceを別processが操作している状態では起動しないでください。
 
 ## インストール
 
@@ -28,9 +29,12 @@ $ export CYCLONEDDS_HOME="$HOME/Packages/cyclonedds/install"
 $ uv sync --all-groups
 ```
 
-このPCで実際に使っているinstall prefixを指定してください。Unitree SDKを使うcommandを実行するときも、shell environmentに`CYCLONEDDS_HOME`を残します。依存関係のinstall時にCycloneDDSが見つからないと表示された場合は、prefix内にinstall済みlibraryとCMake metadataがあることを確認してから`uv sync`を再実行してください。
+このPCで実際に使っているinstall prefixを指定してください。
+Unitree SDKを使うcommandを実行するときも、shell environmentに`CYCLONEDDS_HOME`を残します。
+依存関係のinstall時にCycloneDDSが見つからないと表示された場合は、prefix内にinstall済みlibraryとCMake metadataがあることを確認してから`uv sync`を再実行してください。
 
-既定の設定pathはcurrent working directoryからの相対pathです。すべての設定pathを明示しない場合はrepository rootからcommandを実行してください。
+既定の設定pathはcurrent working directoryからの相対pathです。
+すべての設定pathを明示しない場合はrepository rootからcommandを実行してください。
 
 ## 設定ファイルの準備
 
@@ -45,12 +49,14 @@ $ cp examples/keyboard-zenoh-config.example.json5 examples/keyboard-zenoh-config
 
 | 実行時ファイル | 用途 |
 | --- | --- |
-| `config/node-config.json5` | Go2 DDS interface、State watchdog、制御timeout、`robot_key` |
+| `config/node-config.json5` | Go2 DDS interface、State freshness、SportClient、制御設定 |
 | `config/zenoh-config.json5` | robot nodeのZenoh mode、listener、接続、scouting |
-| `examples/keyboard-config.json5` | keyboardの目標速度、ramp rate、表示freshness、`robot_key` |
+| `examples/keyboard-config.json5` | keyboardの目標速度、ramp rate、表示freshness、`zenoh_key_prefix` |
 | `examples/keyboard-zenoh-config.json5` | keyboardのZenoh接続 |
 
-これらはPC・network固有の値を含むため、実行時ファイルはGitの管理対象外です。nodeとkeyboardのapplication設定はstrictなJSON5であり、必須fieldの欠落、未知のfield、誤った型は起動時errorになります。Zenoh設定はZenoh libraryが検証します。
+これらはPC・network固有の値を含むため、実行時ファイルはGitの管理対象外です。
+nodeとkeyboardのapplication設定はstrictなJSON5であり、必須fieldの欠落、未知のfield、誤った型は起動時errorになります。
+Zenoh設定はZenoh libraryが検証します。
 
 ## Go2用DDS interfaceの選択
 
@@ -61,7 +67,8 @@ $ ip -br link
 $ ip -br address
 ```
 
-Go2へ有線接続したinterfaceを特定し、upになっていることを確認します。interface名が`enp3s0`の場合は、次のcommandが確認に使えます。
+Go2へ有線接続したinterfaceを特定し、upになっていることを確認します。
+interface名が`enp3s0`の場合は、次のcommandが確認に使えます。
 
 ```console
 $ ip link show enp3s0
@@ -75,26 +82,35 @@ IP addressではなくinterface名を`config/node-config.json5`へ設定しま�
 dds: {
   domain_id: 0,
   network_interface: "enp3s0",
-  rpc_timeout_seconds: 0.2,
   sport_mode_state_topic: "rt/sportmodestate",
+  first_state_timeout_seconds: 1.0,
+  state_freshness_seconds: 0.2,
+},
+sport_client: {
+  rpc_timeout_seconds: 0.2,
 }
 ```
 
-exampleのinterface名はplaceholderです。このPCで確認せずにコピーしないでください。DDS trafficはこのinterfaceを使い、robot nodeとkeyboardのZenoh接続とは独立しています。
+exampleのinterface名はplaceholderです。
+このPCで確認せずにコピーしないでください。
+DDS trafficはこのinterfaceを使い、robot nodeとkeyboardのZenoh接続とは独立しています。
 
 ## Zenohでnodeとkeyboardを接続する
 
-`config/node-config.json5`と`examples/keyboard-config.json5`では、同じconcreteなZenoh keyを`robot_key`に設定します。同梱値は次のとおりです。
+`config/node-config.json5`と`examples/keyboard-config.json5`では、同じconcreteなZenoh key prefixを`zenoh_key_prefix`に設定します。
+同梱値は次のとおりです。
 
 ```json5
-robot_key: "unitree/go2"
+zenoh_key_prefix: "unitree/go2"
 ```
 
-2つのZenohファイルはprocess同士の接続方法を決めます。DDS interfaceを選ぶ設定ではありません。
+2つのZenohファイルはprocess同士の接続方法を決めます。
+DDS interfaceを選ぶ設定ではありません。
 
 ### 両processを1台のPCで動かす場合
 
-両方で同じTCP portをbindせず、片方をlistener、もう片方をclientにします。loopbackだけでlistenするrobot node設定は次のとおりです。
+両方で同じTCP portをbindせず、片方をlistener、もう片方をclientにします。
+loopbackだけでlistenするrobot node設定は次のとおりです。
 
 ```json5
 {
@@ -131,11 +147,16 @@ keyboardはこのlistenerへ接続するclientにします。
 
 ### 別hostで動かす場合
 
-robot nodeを到達可能なinterfaceでlistenさせ、keyboardからそのhostのaddressへ接続します。たとえばnodeが`tcp/0.0.0.0:7447`でlistenする場合、keyboardは`tcp/192.168.1.20:7447`のようにnode PCの到達可能なaddressへ接続します。
+robot nodeを到達可能なinterfaceでlistenさせ、keyboardからそのhostのaddressへ接続します。
+たとえばnodeが`tcp/0.0.0.0:7447`でlistenする場合、keyboardは`tcp/192.168.1.20:7447`のようにnode PCの到達可能なaddressへ接続します。
 
-`0.0.0.0`はローカルのwildcard bind addressであり、remote側の`connect.endpoints`へ書くaddressではありません。port 7447を別listenerが使っていない必要があります。全interfaceでlistenすると、到達可能な全networkへendpointを公開するため、必要に応じてbind addressやfirewallを制限してください。
+`0.0.0.0`はローカルのwildcard bind addressであり、remote側の`connect.endpoints`へ書くaddressではありません。
+port 7447を別listenerが使っていない必要があります。
+全interfaceでlistenすると、到達可能な全networkへendpointを公開するため、必要に応じてbind addressやfirewallを制限してください。
 
-example Zenoh設定には認証や暗号化がありません。信頼できるnetworkだけで使ってください。別のtopologyを選ぶ場合は[Zenoh deployment guide](https://zenoh.io/docs/getting-started/deployment/)を参照してください。
+example Zenoh設定には認証や暗号化がありません。
+信頼できるnetworkだけで使ってください。
+別のtopologyを選ぶ場合は[Zenoh deployment guide](https://zenoh.io/docs/getting-started/deployment/)を参照してください。
 
 ## 別の場所にある設定を使う
 
@@ -165,7 +186,7 @@ $ uv run examples/keyboard.py \
 2. 人、cable、障害物をrobotの可動範囲外へ移動する。
 3. 無線remoteを手元に置き、緊急停止手順を確認する。
 4. 最初はkeyboard exampleの保守的な目標速度を使う。
-5. 専用DDS interfaceと、両application設定の`robot_key`を確認する。
+5. 専用DDS interfaceと、両application設定の`zenoh_key_prefix`を確認する。
 6. robot nodeを先に起動し、freshなStateを確認してからkeyboardを起動する。
 
 Zenoh keyboardやprocess終了操作は緊急停止の代わりにはなりません。

@@ -11,15 +11,18 @@ $ export CYCLONEDDS_HOME="$HOME/Packages/cyclonedds/install"
 $ uv run node.py
 ```
 
-The node waits for a valid `SportModeState` before accepting commands. Start the keyboard in a second terminal only after the node is receiving State:
+The node waits for a valid `SportModeState` before accepting commands.
+Start the keyboard in a second terminal only after the node is receiving State:
 
 ```console
 $ uv run examples/keyboard.py
 ```
 
-The keyboard sends zero velocity when Shift is released, its window loses focus, the window closes, or the program exits. Stop the keyboard before the robot node.
+The keyboard sends zero velocity when Shift is released, its window loses focus, the window closes, or the program exits.
+Stop the keyboard before the robot node.
 
-`Ctrl-C` or `SIGTERM` asks the robot node to run its State-driven Down workflow before closing DDS. Keep the remote ready: normal process shutdown is not an emergency stop and cannot guarantee motion cessation when communication or the SDK is unavailable.
+`Ctrl-C` or `SIGTERM` asks the robot node to run its State-driven Down workflow before closing DDS.
+Keep the remote ready: normal process shutdown is not an emergency stop and cannot guarantee motion cessation when communication or the SDK is unavailable.
 
 ## CLI options
 
@@ -38,27 +41,29 @@ $ uv run node.py --help
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--keyboard-config FILE` | `examples/keyboard-config.json5` | Keyboard targets, rates, and robot key |
+| `--keyboard-config FILE` | `examples/keyboard-config.json5` | Keyboard targets, rates, and Zenoh key prefix |
 | `--zenoh-config FILE` | `examples/keyboard-zenoh-config.json5` | Keyboard Zenoh configuration |
 
 ```console
 $ uv run examples/keyboard.py --help
 ```
 
-CLI options select complete files. Individual values cannot be overridden on the command line.
+CLI options select complete files.
+Individual values cannot be overridden on the command line.
 
 ## Robot-node configuration
 
-The complete tracked example is [`config/node-config.example.json5`](../../config/node-config.example.json5). Unknown fields, missing required fields, and incorrectly typed fields are rejected.
+The complete tracked example is [`config/node-config.example.json5`](../../config/node-config.example.json5).
+Unknown fields, missing required fields, and incorrectly typed fields are rejected.
 
 ### Top-level settings
 
 | Key | Type | Description |
 | --- | --- | --- |
-| `robot_key` | concrete Zenoh key | Root for this robot's command and State keys; wildcards are rejected |
-| `state_heartbeat_seconds` | number greater than 0 | Idle heartbeat interval for public State; a synchronous SDK call can delay publication until the control thread returns |
+| `zenoh_key_prefix` | concrete Zenoh key | Prefix for this robot's command and State keys; wildcards are rejected |
+| `node_state_publish_frequency_hz` | Hz, greater than 0 | Frequency of the independent Node State publisher |
 
-The keyboard `robot_key` must match exactly.
+The keyboard `zenoh_key_prefix` must match exactly.
 
 ### `dds` settings
 
@@ -66,25 +71,31 @@ The keyboard `robot_key` must match exactly.
 | --- | --- | --- |
 | `domain_id` | integer, 0 or greater | DDS domain passed to the Unitree channel factory |
 | `network_interface` | non-empty string | Dedicated wired interface name connected to the Go2 |
-| `rpc_timeout_seconds` | number greater than 0 | Synchronous SportClient RPC timeout |
 | `sport_mode_state_topic` | non-empty string | DDS `SportModeState` topic; default contract is `rt/sportmodestate` |
+| `first_state_timeout_seconds` | number greater than 0 | Time allowed for the first valid `SportModeState` |
+| `state_freshness_seconds` | number greater than 0 | Maximum age of the latest valid DDS observation |
 
-### `state` settings
+### `sport_client` settings
 
 | Key | Type | Description |
 | --- | --- | --- |
-| `startup_timeout_seconds` | number greater than 0 | Time allowed for the first valid `SportModeState` |
-| `maximum_age_seconds` | number greater than 0 | DDS freshness watchdog deadline used by the control loop to close command ingress |
-| `linear_velocity_quiescent_threshold` | number greater than 0 | Maximum absolute measured linear component considered quiescent |
-| `yaw_speed_quiescent_threshold` | number greater than 0 | Maximum absolute measured yaw speed considered quiescent |
+| `rpc_timeout_seconds` | number greater than 0 | Synchronous SportClient RPC timeout |
 
-The quiescent thresholds do not determine whether a standing robot can accept velocity. They are used to confirm Down and to prevent `StandDown()` while measured motion remains above a threshold.
+### `robot_state` settings
+
+| Key | Type | Description |
+| --- | --- | --- |
+| `quiescent_linear_speed_mps` | m/s, greater than 0 | Maximum absolute measured linear component considered quiescent |
+| `quiescent_yaw_rate_rad_s` | rad/s, greater than 0 | Maximum absolute measured yaw rate considered quiescent |
+
+The quiescent thresholds do not determine whether a standing robot can accept velocity.
+They are used to confirm Down and to prevent `StandDown()` while measured motion remains above a threshold.
 
 ### `control` settings
 
 | Key | Type | Description |
 | --- | --- | --- |
-| `velocity_deadman_seconds` | number greater than 0 | Maximum age of the latest velocity request; the next applicable State sends one zero `Move` and clears the request |
+| `velocity_command_timeout_seconds` | number greater than 0 | Maximum age of the latest velocity request; the next applicable State sends one zero `Move` and clears the request |
 | `shutdown_timeout_seconds` | number greater than 0 | Maximum time for observed State to complete the shutdown Down workflow |
 
 ## Keyboard configuration
@@ -95,13 +106,14 @@ The complete tracked example is [`examples/keyboard-config.example.json5`](../..
 
 | Key | Type | Description |
 | --- | --- | --- |
-| `robot_key` | concrete Zenoh key | Must match the robot node |
-| `publish_frequency_hz` | number greater than 0 | Keyboard update, velocity publication, and display frequency |
-| `state_stale_after_seconds` | number greater than 0 | Dashboard-only timeout for missing public State updates |
+| `zenoh_key_prefix` | concrete Zenoh key | Must match the robot node |
+| `loop_frequency_hz` | positive integer Hz | Keyboard input, velocity publication, and display frequency |
+| `node_state_timeout_seconds` | number greater than 0 | Dashboard-only timeout for missing Node State publications |
 
-`state_stale_after_seconds` affects only the dashboard. It is not the node's DDS watchdog.
+`node_state_timeout_seconds` affects only the dashboard.
+It is not the node's DDS freshness threshold.
 
-### `targets` settings
+### `velocity_targets` settings
 
 | Key | Type | Description |
 | --- | --- | --- |
@@ -111,13 +123,13 @@ The complete tracked example is [`examples/keyboard-config.example.json5`](../..
 
 The example targets are intentionally lower than the protocol limits.
 
-### `ramp_rates` settings
+### `velocity_ramp_rates` settings
 
 | Key | Type | Description |
 | --- | --- | --- |
-| `vx` | number greater than 0 | Maximum forward/backward command change per second |
-| `vy` | number greater than 0 | Maximum lateral command change per second |
-| `vyaw` | number greater than 0 | Maximum yaw command change per second |
+| `vx_mps2` | m/s², greater than 0 | Maximum forward/backward command change per second |
+| `vy_mps2` | m/s², greater than 0 | Maximum lateral command change per second |
+| `vyaw_rad_s2` | rad/s², greater than 0 | Maximum yaw-rate command change per second |
 
 ## Keyboard controls
 
@@ -135,11 +147,13 @@ Shift is the motion deadman and is also required when sending a posture request.
 | Window loses focus | Publish zero velocity and require Shift release before rearming |
 | `Esc` or close window | Publish zero velocity and exit |
 
-The keyboard ramps local velocity toward the configured targets. It publishes the current velocity every update while running. It publishes posture only on the corresponding key-down event and does not retry posture requests.
+The keyboard ramps local velocity toward the configured targets.
+It publishes the current velocity every update while running.
+It publishes posture only on the corresponding key-down event and does not retry posture requests.
 
 ## Zenoh keys and command contract
 
-For `robot_key: "unitree/go2"`, the node uses:
+For `zenoh_key_prefix: "unitree/go2"`, the node uses:
 
 | Key | Direction | Content |
 | --- | --- | --- |
@@ -170,48 +184,55 @@ The keyboard publishes velocity with drop congestion control and best-effort rel
 {"type":"posture","posture":"down"}
 ```
 
-The only posture values are `stand` and `down`. The keyboard publishes posture with block congestion control and reliable delivery. There is no separate Stop command; zero velocity is `Move(0, 0, 0)`, while `StopMove()` belongs only to the node's Down workflow.
+The only posture values are `stand` and `down`.
+The keyboard publishes posture with block congestion control and reliable delivery.
+There is no separate Stop command; zero velocity is `Move(0, 0, 0)`, while `StopMove()` belongs only to the node's Down workflow.
 
-Only the latest velocity and posture are retained. Posture takes priority. A command that is not legal in the Robot State that processes it is discarded, not delayed for a later State.
+Only the latest velocity and posture are retained.
+Posture takes priority.
+A command that is not legal in the Robot State that processes it is discarded, not delayed for a later State.
 
 ## Published State contract
 
-The node publishes a revisioned JSON snapshot on `{robot_key}/state` and answers Zenoh `get` with its latest snapshot.
+The independent publisher periodically sends a JSON snapshot on `{zenoh_key_prefix}/state`.
+Zenoh `get` derives a reply directly from the latest coherent Node State.
 
 ### Top-level fields
 
 | Field | Description |
 | --- | --- |
-| `revision` | Node-local increasing publication revision |
 | `lifecycle` | `starting`, `running`, `shutting_down`, or `stopped` |
-| `connected` | Whether the DDS State freshness watchdog is currently satisfied |
-| `robot` | Latest classified robot observation or Unknown State |
+| `robot_connected` | Whether the latest valid DDS observation is still fresh |
+| `robot_state` | Latest classified robot observation or Unknown State |
 | `accepting_commands` | Single ingress gate for both velocity and posture |
 | `requested_posture` | Latest buffered or active posture target, otherwise `null` |
-| `requested_velocity` | Latest buffered velocity and local receive time, otherwise `null` |
-| `posture_action` | Last posture SDK step sent for the active workflow, otherwise `null` |
-| `last_sdk` | Latest SDK command diagnostic, otherwise `null` |
-| `last_error` | Latest node-level input or shutdown error, otherwise `null` |
+| `requested_velocity` | Latest buffered velocity, otherwise `null` |
+| `last_posture_action` | Last posture SDK step sent for the active workflow, otherwise `null` |
+| `last_sdk_diagnostic` | Latest SDK command diagnostic, otherwise `null` |
+| `last_node_error` | Latest node-level input or shutdown error, otherwise `null` |
 
-`requested_posture`, `posture_action`, and `last_sdk` describe requests and diagnostics. They are not robot posture evidence.
+`requested_posture`, `last_posture_action`, and `last_sdk_diagnostic` describe requests and diagnostics.
+They are not robot posture evidence.
+There is no publication revision or process-local monotonic timestamp in this contract.
 
-### `robot` fields
+### `robot_state` fields
 
 | Field | Description |
 | --- | --- |
 | `state` | `damping`, `down`, `locked_stand`, `ready_stand`, `locomotion`, `unsupported`, or `unknown` |
-| `reason` | For Unknown: `no_sample`, `stale`, `invalid_sample`, or `awaiting_state`; otherwise `null` |
+| `reason` | For Unknown: `no_sample`, `stale`, or `awaiting_state`; otherwise `null` |
 | `motion` | `moving`, `quiescent`, or `unknown` |
 | `state_machine_code` / `state_machine_name` | Unitree V2.0 motion state machine identity |
 | `mode` / `mode_name` | Coarse SportModeState mode |
 | `velocity` | Observed three-component linear velocity, or `null` |
 | `yaw_speed` | Observed yaw speed, or `null` |
-| `received_at` | Node-local monotonic receive time, or `null` |
 | `stamp_sec` / `stamp_nanosec` | Robot-provided State timestamp, or `null` |
 
 ### SDK diagnostic fields
 
-`last_sdk` contains `command`, optional `velocity`, optional integer `code`, and optional `error`. A nonzero SDK code is reported but does not establish or advance Robot State. In particular, `StopMove()` returning `-1` remains a diagnostic; the next observed State decides what can happen.
+`last_sdk_diagnostic` contains `command`, optional `velocity`, optional integer `code`, and optional `error`.
+A nonzero SDK code is reported but does not establish or advance Robot State.
+In particular, `StopMove()` returning `-1` remains a diagnostic; the next observed State decides what can happen.
 
 ## Robot State behavior
 
@@ -225,9 +246,10 @@ The node publishes a revisioned JSON snapshot on `{robot_key}/state` and answers
 | Unsupported | Every other fresh combination | Discard new request | Discard new request | Discard |
 | Unknown | No usable observed State | Reject | Reject | Reject |
 
-Measured motion never changes a movement-capable Ready stand or Locomotion into another State. It is used only to confirm quiescent Crouch as Down and to wait for quiescence between `StopMove()` and `StandDown()`.
+Measured motion never changes a movement-capable Ready stand or Locomotion into another State.
+It is used only to confirm quiescent Crouch as Down and to wait for quiescence between `StopMove()` and `StandDown()`.
 
-For the architectural decision and invariants, see [ADR-0001](../adr/0001-observed-state-driven-control-architecture.md).
+For the action table and concurrency decisions, see [ADR-0001](../adr/0001-observed-state-driven-control-architecture.md) and [ADR-0002](../adr/0002-shared-node-state-concurrency.md).
 
 ## Timing and execution
 
@@ -237,15 +259,20 @@ These timeouts and frequencies have independent purposes:
 | --- | --- | --- |
 | DDS publisher frequency | Set by the Go2 | State arrives asynchronously; the node does not poll DDS at a configured rate |
 | Control wait maximum | 0.05 s | Maximum sleep while waiting for State and checking lifecycle deadlines; State arrival wakes it immediately |
-| `maximum_age_seconds` | 0.2 s | Close command ingress after no valid DDS State; when the control thread is available, detection occurs on its next wake-up, about 0.20–0.25 s with the current wait |
-| `rpc_timeout_seconds` | 0.2 s | Maximum synchronous SportClient RPC wait |
-| `velocity_deadman_seconds` | 0.25 s | On the next applicable State, expire a buffered velocity request and send one zero `Move` |
-| `state_heartbeat_seconds` | 1.0 s | Schedule public State publication even without another public update |
-| `state_stale_after_seconds` | 2.5 s | Keyboard dashboard display timeout only |
+| `dds.state_freshness_seconds` | 0.2 s | Common freshness boundary for control, command ingress, publication, queries, and shutdown |
+| `sport_client.rpc_timeout_seconds` | 0.2 s | Maximum synchronous SportClient RPC wait |
+| `control.velocity_command_timeout_seconds` | 0.25 s | On the next applicable State, expire a buffered velocity request and send one zero `Move` |
+| `node_state_publish_frequency_hz` | 20 Hz | Independent periodic Node State publication |
+| `node_state_timeout_seconds` | 2.5 s | Keyboard dashboard display timeout only |
 
-DDS reception is asynchronous. Its callback converts incoming State and wakes the single synchronous control loop, which retains the newest pending State. The loop classifies one State, checks posture before velocity, and sends at most one SDK call for that State.
+DDS reception is asynchronous.
+The Unitree subscriber's `queueLen=1` reader thread converts incoming State, stores the newest observation with its local receive time, and wakes the control worker.
+The worker classifies the newest unprocessed observation, checks posture before velocity, and sends at most one SDK call for it.
 
-SportClient RPCs are synchronous in the control thread. DDS reception continues while an RPC is running, but freshness enforcement, heartbeat publication, and command processing wait for the RPC to return; therefore the 0.2-second watchdog is not a hard scheduling guarantee while that thread is blocked. Before a posture RPC, the node publishes Robot State as Unknown and closes command ingress. Only a valid State received after that RPC returns can replace Unknown and continue the workflow.
+SportClient calls are synchronous only in the control worker.
+DDS reception, Zenoh callbacks, queries, and periodic publication continue while it is blocked.
+A posture effect first commits Unknown Robot State semantics and closes command ingress; the next periodic publication or query observes that state.
+Only a valid DDS observation received after the call returns can continue the workflow.
 
 ## Down and shutdown
 
@@ -256,9 +283,13 @@ StopMove once -> newer State -> wait until quiescent
               -> StandDown once -> newer observed Down -> complete
 ```
 
-SDK return values do not skip or complete a step. Damping does not confirm Down. If a new Stand request is accepted while a Down workflow is waiting in Damping, it replaces the Down target and may select `RecoveryStand()` from the next applicable State.
+SDK return values do not skip or complete a step.
+Damping does not confirm Down.
+If a new Stand request is accepted while a Down workflow is waiting in Damping, it replaces the Down target and may select `RecoveryStand()` from the next applicable State.
 
-Shutdown closes normal command ingress and uses the same Down workflow. Only observed Down completes it. If the shutdown deadline expires first, the final public State records a node error before the process closes its subscriber.
+Shutdown closes normal command ingress and uses the same Down workflow.
+Only observed Down completes it.
+If the shutdown deadline expires first, the final public State records a node error before the process closes its subscriber.
 
 ## Troubleshooting
 
@@ -268,27 +299,35 @@ Shutdown closes normal command ingress and uses the same Down workflow. Only obs
 - Confirm `dds.network_interface`, `domain_id`, and `sport_mode_state_topic`.
 - Confirm CycloneDDS can use the selected interface.
 
-The node exits with a nonzero status if no valid startup State arrives before `startup_timeout_seconds`.
+The node exits with a nonzero status if no valid startup State arrives before `dds.first_state_timeout_seconds`.
 
-### `connected` is false or `reason` is `stale`
+### `robot_connected` is false or `reason` is `stale`
 
-No valid DDS State has arrived within `maximum_age_seconds`. New commands are rejected and buffered commands are cleared. Restore DDS State; do not infer the robot's posture from the last SDK result.
+No valid DDS State has arrived within `dds.state_freshness_seconds`.
+New commands are rejected, unsafe buffered state is cleared by control, and public State contains no stale observation values.
+Restore DDS State; do not infer the robot's posture from the last SDK result.
 
 ### Robot State is Unknown with `awaiting_state`
 
-This is expected immediately around a posture RPC. Commands remain closed until a valid State received after the RPC returns.
+This is expected immediately around a posture RPC.
+Commands remain closed until a valid State received after the RPC returns.
 
 ### Robot State is Unsupported
 
-The State sample is fresh, but its motion state machine and coarse mode are not in the supported table. Command ingress can remain open, but commands are discarded when processed in Unsupported. Inspect the raw state machine, mode, motion, and firmware version before changing any classification.
+The State sample is fresh, but its motion state machine and coarse mode are not in the supported table.
+Command ingress can remain open, but commands are discarded when processed in Unsupported.
+Inspect the raw state machine, mode, motion, and firmware version before changing any classification.
 
 ### Dashboard says waiting or stale
 
-Confirm the robot node is running, both applications use the same `robot_key`, and their Zenoh configurations join the same network. Dashboard staleness is separate from DDS freshness shown by `connected`.
+Confirm the robot node is running, both applications use the same `zenoh_key_prefix`, and their Zenoh configurations join the same network.
+Dashboard staleness is separate from DDS freshness shown by `robot_connected`.
 
-### `last_sdk.error` reports an SDK code or exception
+### `last_sdk_diagnostic.error` reports an SDK code or exception
 
-Treat it as diagnostic information. Check the next observed Robot State and the physical robot. Do not repeatedly send posture commands based only on the return code.
+Treat it as diagnostic information.
+Check the next observed Robot State and the physical robot.
+Do not repeatedly send posture commands based only on the return code.
 
 ## Manual real-hardware acceptance
 
