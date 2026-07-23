@@ -14,7 +14,7 @@ $ uv run node.py
 nodeは有効な`SportModeState`を受信するまでcommandを受け付けません。nodeがStateを受信してから、別terminalでkeyboardを起動します。
 
 ```console
-$ uv run --group example python -m examples.keyboard
+$ uv run examples/keyboard.py
 ```
 
 Shiftを離したとき、windowがfocusを失ったとき、windowを閉じたとき、またはprogramを終了したとき、keyboardは速度0を送信します。robot nodeより先にkeyboardを終了してください。
@@ -42,7 +42,7 @@ $ uv run node.py --help
 | `--zenoh-config FILE` | `examples/keyboard-zenoh-config.json5` | keyboardのZenoh設定 |
 
 ```console
-$ uv run --group example python -m examples.keyboard --help
+$ uv run examples/keyboard.py --help
 ```
 
 CLI optionは設定ファイル全体を選択します。個々の値をcommand lineから上書きすることはできません。

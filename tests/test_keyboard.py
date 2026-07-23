@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import importlib
 import json
+import os
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 from config import load_keyboard_config
 from controller import PostureTarget
+from examples import keyboard
 from examples.keyboard import (
     ZERO_VELOCITY,
     CommandPublisher,
@@ -26,6 +31,31 @@ class PutRecorder:
 
 
 class KeyboardTests(unittest.TestCase):
+    def test_direct_script_help_succeeds(self) -> None:
+        environment = os.environ.copy()
+        environment["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "examples/keyboard.py"), "--help"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("unitree-go2-keyboard", result.stdout)
+        self.assertIn("--keyboard-config", result.stdout)
+        self.assertIn("--zenoh-config", result.stdout)
+
+    def test_module_import_does_not_modify_sys_path(self) -> None:
+        original_path = sys.path.copy()
+
+        importlib.reload(keyboard)
+
+        self.assertEqual(sys.path, original_path)
+
     def test_approach_does_not_overshoot(self) -> None:
         self.assertEqual(approach(0.0, 1.0, 0.25), 0.25)
         self.assertEqual(approach(0.9, 1.0, 0.25), 1.0)

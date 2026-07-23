@@ -14,7 +14,7 @@ $ uv run node.py
 The node waits for a valid `SportModeState` before accepting commands. Start the keyboard in a second terminal only after the node is receiving State:
 
 ```console
-$ uv run --group example python -m examples.keyboard
+$ uv run examples/keyboard.py
 ```
 
 The keyboard sends zero velocity when Shift is released, its window loses focus, the window closes, or the program exits. Stop the keyboard before the robot node.
@@ -42,7 +42,7 @@ $ uv run node.py --help
 | `--zenoh-config FILE` | `examples/keyboard-zenoh-config.json5` | Keyboard Zenoh configuration |
 
 ```console
-$ uv run --group example python -m examples.keyboard --help
+$ uv run examples/keyboard.py --help
 ```
 
 CLI options select complete files. Individual values cannot be overridden on the command line.

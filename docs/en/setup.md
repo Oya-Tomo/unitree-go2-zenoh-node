@@ -150,7 +150,7 @@ $ uv run node.py \
 The keyboard accepts explicit keyboard and Zenoh paths:
 
 ```console
-$ uv run --group example python -m examples.keyboard \
+$ uv run examples/keyboard.py \
     --keyboard-config /etc/unitree-go2-zenoh-node/keyboard.json5 \
     --zenoh-config /etc/unitree-go2-zenoh-node/keyboard-zenoh.json5
 ```

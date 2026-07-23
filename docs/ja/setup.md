@@ -150,7 +150,7 @@ $ uv run node.py \
 keyboardではkeyboard設定とZenoh設定のpathを明示できます。
 
 ```console
-$ uv run --group example python -m examples.keyboard \
+$ uv run examples/keyboard.py \
     --keyboard-config /etc/unitree-go2-zenoh-node/keyboard.json5 \
     --zenoh-config /etc/unitree-go2-zenoh-node/keyboard-zenoh.json5
 ```
