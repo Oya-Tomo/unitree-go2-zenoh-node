@@ -26,7 +26,7 @@ robot nodeを起動してからkeyboard controllerを起動します。
 
 ```console
 $ uv run node.py
-$ uv run --group example python -m examples.keyboard
+$ uv run examples/keyboard.py
 ```
 
 実機へcommandを送る前に[使い方](docs/ja/usage.md)を確認してください。

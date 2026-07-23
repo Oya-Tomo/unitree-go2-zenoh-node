@@ -26,7 +26,7 @@ Start the robot node, then the keyboard controller:
 
 ```console
 $ uv run node.py
-$ uv run --group example python -m examples.keyboard
+$ uv run examples/keyboard.py
 ```
 
 See [Usage](docs/en/usage.md) before sending commands to the robot.

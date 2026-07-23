@@ -11,6 +11,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+# Direct script execution bootstraps repository-local imports below.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import pygame
 import zenoh
 from pydantic import ValidationError
