@@ -12,7 +12,7 @@ import pygame
 from pydantic import ValidationError
 
 from config import KeyboardConfig
-from controller import Keyspace, NodeState
+from controller import Keyspace, PublishedNodeState
 
 WINDOW_SIZE = (920, 620)
 BACKGROUND = (20, 23, 28)
@@ -34,16 +34,16 @@ class StateSample(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
-class ObservedSnapshot:
-    value: NodeState
+class ReceivedNodeState:
+    value: PublishedNodeState
     received_at: float
 
-    def is_stale(self, *, now: float, maximum_age: float) -> bool:
-        return now - self.received_at >= maximum_age
+    def is_stale(self, *, now: float, maximum_age_seconds: float) -> bool:
+        return now - self.received_at >= maximum_age_seconds
 
 
-class RobotStateCache:
-    """Thread-safe read model for the node's canonical State snapshot."""
+class NodeStateCache:
+    """Thread-safe cache of the latest public Node State snapshot."""
 
     def __init__(
         self,
@@ -53,28 +53,28 @@ class RobotStateCache:
     ) -> None:
         self.keyspace = keyspace
         self._clock = clock
-        self._state: ObservedSnapshot | None = None
+        self._state: ReceivedNodeState | None = None
         self._lock = Lock()
 
     def update(self, sample: StateSample, *, initial_reply: bool = False) -> None:
         if str(sample.key_expr) != self.keyspace.state:
             return
         try:
-            state = NodeState.model_validate_json(sample.payload.to_bytes())
+            state = PublishedNodeState.model_validate_json(sample.payload.to_bytes())
         except (UnicodeDecodeError, ValidationError, ValueError):
             return
         with self._lock:
             if initial_reply and self._state is not None:
                 return
-            self._state = ObservedSnapshot(state, self._clock())
+            self._state = ReceivedNodeState(state, self._clock())
 
-    def latest(self) -> ObservedSnapshot | None:
+    def latest(self) -> ReceivedNodeState | None:
         with self._lock:
             return self._state
 
 
 class Dashboard:
-    def __init__(self, config: KeyboardConfig, cache: RobotStateCache) -> None:
+    def __init__(self, config: KeyboardConfig, cache: NodeStateCache) -> None:
         self._config = config
         self._cache = cache
         pygame.display.set_caption("Unitree Go2 Zenoh keyboard controller")
@@ -89,19 +89,19 @@ class Dashboard:
         deadman: bool,
         now: float,
     ) -> list[tuple[pygame.font.Font, str, tuple[int, int, int]]]:
-        observed = self._cache.latest()
-        if observed is None:
+        received = self._cache.latest()
+        if received is None:
             state_lines = [
                 (self._small_font, "Node State: waiting", WARNING),
             ]
-        elif observed.is_stale(
+        elif received.is_stale(
             now=now,
-            maximum_age=self._config.state_stale_after_seconds,
+            maximum_age_seconds=self._config.node_state_timeout_seconds,
         ):
             state_lines = [(self._small_font, "Node State: stale", WARNING)]
         else:
-            snapshot = observed.value
-            state = snapshot.robot
+            snapshot = received.value
+            state = snapshot.robot_state
             velocity_text = (
                 "unknown"
                 if state.velocity is None
@@ -111,7 +111,7 @@ class Dashboard:
                 )
             )
             requested_velocity = snapshot.requested_velocity
-            diagnostic = snapshot.last_sdk
+            diagnostic = snapshot.last_sdk_diagnostic
             state_lines = [
                 (
                     self._small_font,
@@ -140,7 +140,7 @@ class Dashboard:
                     self._small_font,
                     "Requested posture: "
                     f"{snapshot.requested_posture or 'none'}  "
-                    f"action={snapshot.posture_action or 'none'}",
+                    f"action={snapshot.last_posture_action or 'none'}",
                     FOREGROUND,
                 ),
                 (
@@ -157,8 +157,8 @@ class Dashboard:
                 ),
                 (
                     self._small_font,
-                    "DDS connected: "
-                    f"{snapshot.connected}  "
+                    "Robot connected: "
+                    f"{snapshot.robot_connected}  "
                     f"accepting commands={snapshot.accepting_commands}",
                     FOREGROUND,
                 ),
@@ -175,14 +175,14 @@ class Dashboard:
                 ),
                 (
                     self._small_font,
-                    f"Node error: {snapshot.last_error or 'none'}",
-                    WARNING if snapshot.last_error else FOREGROUND,
+                    f"Node error: {snapshot.last_node_error or 'none'}",
+                    WARNING if snapshot.last_node_error else FOREGROUND,
                 ),
             ]
         return [
             (
                 self._font,
-                f"Go2 keyboard node: {self._cache.keyspace.robot_key}",
+                f"Go2 keyboard node: {self._cache.keyspace.prefix}",
                 ACCENT,
             ),
             (

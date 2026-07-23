@@ -5,7 +5,8 @@
 Zenoh経由で速度・姿勢commandを受信し、high-level SportClient APIを使って1台のUnitree Go2を制御する単独実行nodeです。
 
 > [!WARNING]
-> このソフトウェアは実機を動かします。機体を支持し、無線remoteと緊急停止手順を用意し、最初は低速で試してください。
+> このソフトウェアは実機を動かします。
+> 機体を支持し、無線remoteと緊急停止手順を用意し、最初は低速で試してください。
 
 ## クイックスタート
 
@@ -20,7 +21,8 @@ $ cp examples/keyboard-config.example.json5 examples/keyboard-config.json5
 $ cp examples/keyboard-zenoh-config.example.json5 examples/keyboard-zenoh-config.json5
 ```
 
-nodeを起動する前に、このPCとnetworkに合わせて4つの実行時設定を編集してください。DDS・Zenohを含む手順は[セットアップ](docs/ja/setup.md)にあります。
+nodeを起動する前に、このPCとnetworkに合わせて4つの実行時設定を編集してください。
+DDS・Zenohを含む手順は[セットアップ](docs/ja/setup.md)にあります。
 
 robot nodeを起動してからkeyboard controllerを起動します。
 
@@ -35,5 +37,6 @@ $ uv run examples/keyboard.py
 
 - [セットアップ](docs/ja/setup.md)
 - [使い方・操作・wire contract](docs/ja/usage.md)
-- [アーキテクチャ決定記録](docs/adr/0001-observed-state-driven-control-architecture.md)
+- [観測State制御のADR](docs/adr/0001-observed-state-driven-control-architecture.md)
+- [共有Node State concurrencyのADR](docs/adr/0002-shared-node-state-concurrency.md)
 - [English documentation](README.md)

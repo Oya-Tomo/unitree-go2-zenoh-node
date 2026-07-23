@@ -72,9 +72,9 @@ class KeyboardTests(unittest.TestCase):
         self.assertEqual(
             velocity,
             (
-                min(config.ramp_rates.vx * 0.1, 1.0),
-                min(config.ramp_rates.vy * 0.1, 1.0),
-                min(config.ramp_rates.vyaw * 0.1, 1.0),
+                min(config.velocity_ramp_rates.vx_mps2 * 0.1, 1.0),
+                min(config.velocity_ramp_rates.vy_mps2 * 0.1, 1.0),
+                min(config.velocity_ramp_rates.vyaw_rad_s2 * 0.1, 1.0),
             ),
         )
 

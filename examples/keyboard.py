@@ -27,10 +27,11 @@ from controller import (
     PostureTarget,
     VelocityCommand,
 )
-from examples.keyboard_dashboard import Dashboard, RobotStateCache
+from examples.keyboard_dashboard import Dashboard, NodeStateCache
 
 DEFAULT_KEYBOARD_CONFIG_PATH = Path("examples/keyboard-config.json5")
 DEFAULT_ZENOH_CONFIG_PATH = Path("examples/keyboard-zenoh-config.json5")
+INITIAL_STATE_QUERY_TIMEOUT_SECONDS = 0.5
 ZERO_VELOCITY = (0.0, 0.0, 0.0)
 
 
@@ -59,10 +60,10 @@ class CommandPublisher:
     def __init__(
         self,
         velocity_put: Callable[[str], object],
-        action_put: Callable[[str], object],
+        posture_put: Callable[[str], object],
     ) -> None:
         self._velocity_put = velocity_put
-        self._action_put = action_put
+        self._posture_put = posture_put
 
     def publish_velocity(self, velocity: tuple[float, float, float]) -> None:
         self._velocity_put(
@@ -75,11 +76,14 @@ class CommandPublisher:
 
     def publish_posture(self, posture: PostureTarget) -> None:
         # The node owns the request workflow. The keyboard never retries.
-        self._action_put(PostureCommand(posture=posture).model_dump_json())
+        self._posture_put(PostureCommand(posture=posture).model_dump_json())
 
 
-def fetch_initial_state(session: zenoh.Session, cache: RobotStateCache) -> None:
-    for reply in session.get(cache.keyspace.state, timeout=0.5):
+def fetch_initial_state(session: zenoh.Session, cache: NodeStateCache) -> None:
+    for reply in session.get(
+        cache.keyspace.state,
+        timeout=INITIAL_STATE_QUERY_TIMEOUT_SECONDS,
+    ):
         sample = reply.ok
         if sample is not None:
             cache.update(sample, initial_reply=True)
@@ -119,9 +123,9 @@ def target_velocity(
 ) -> tuple[float, float, float]:
     if not deadman:
         return ZERO_VELOCITY
-    vx = float(keys[pygame.K_w] - keys[pygame.K_s]) * config.targets.vx
-    vy = float(keys[pygame.K_a] - keys[pygame.K_d]) * config.targets.vy
-    vyaw = float(keys[pygame.K_q] - keys[pygame.K_e]) * config.targets.vyaw
+    vx = float(keys[pygame.K_w] - keys[pygame.K_s]) * config.velocity_targets.vx
+    vy = float(keys[pygame.K_a] - keys[pygame.K_d]) * config.velocity_targets.vy
+    vyaw = float(keys[pygame.K_q] - keys[pygame.K_e]) * config.velocity_targets.vyaw
     return (vx, vy, vyaw)
 
 
@@ -132,12 +136,20 @@ def ramp_velocity(
     elapsed_seconds: float,
 ) -> tuple[float, float, float]:
     return (
-        approach(current[0], target[0], config.ramp_rates.vx * elapsed_seconds),
-        approach(current[1], target[1], config.ramp_rates.vy * elapsed_seconds),
+        approach(
+            current[0],
+            target[0],
+            config.velocity_ramp_rates.vx_mps2 * elapsed_seconds,
+        ),
+        approach(
+            current[1],
+            target[1],
+            config.velocity_ramp_rates.vy_mps2 * elapsed_seconds,
+        ),
         approach(
             current[2],
             target[2],
-            config.ramp_rates.vyaw * elapsed_seconds,
+            config.velocity_ramp_rates.vyaw_rad_s2 * elapsed_seconds,
         ),
     )
 
@@ -219,7 +231,7 @@ class KeyboardController:
         shift_pressed = bool(keys[pygame.K_LSHIFT] or keys[pygame.K_RSHIFT])
         deadman = self._deadman.is_armed(shift_pressed=shift_pressed)
         now = time.monotonic()
-        period = 1.0 / self._config.publish_frequency_hz
+        period = 1.0 / self._config.loop_frequency_hz
         elapsed = min(now - self._last_update, period * 2.0)
         self._last_update = now
         if zero_requested or keys[pygame.K_SPACE] or not deadman:
@@ -247,14 +259,14 @@ class KeyboardController:
                 )
                 self._publisher.publish_velocity(self._velocity)
                 self._dashboard.draw(self._velocity, deadman=deadman)
-                frame_clock.tick(max(1, round(self._config.publish_frequency_hz)))
+                frame_clock.tick(self._config.loop_frequency_hz)
         finally:
             self._publisher.publish_velocity(ZERO_VELOCITY)
 
 
 def run(zenoh_config: zenoh.Config, config: KeyboardConfig) -> None:
-    keyspace = Keyspace(config.robot_key)
-    cache = RobotStateCache(keyspace)
+    keyspace = Keyspace(config.zenoh_key_prefix)
+    cache = NodeStateCache(keyspace)
     zenoh.init_log_from_env_or("error")
     pygame.init()
 
@@ -268,7 +280,7 @@ def run(zenoh_config: zenoh.Config, config: KeyboardConfig) -> None:
                     reliability=zenoh.Reliability.BEST_EFFORT,
                 )
             )
-            action_publisher = resources.enter_context(
+            posture_publisher = resources.enter_context(
                 session.declare_publisher(
                     keyspace.command,
                     encoding=JSON_ENCODING,
@@ -282,7 +294,7 @@ def run(zenoh_config: zenoh.Config, config: KeyboardConfig) -> None:
             fetch_initial_state(session, cache)
             publisher = CommandPublisher(
                 velocity_publisher.put,
-                action_publisher.put,
+                posture_publisher.put,
             )
             KeyboardController(
                 config,

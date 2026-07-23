@@ -19,6 +19,7 @@ from pydantic import (
 from controller import VX_MAX, VX_MIN, VY_MAX, VYAW_MAX
 
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
+PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 PositiveFloat = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
 
 
@@ -26,23 +27,26 @@ class ConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
-def validate_robot_key(value: str) -> str:
+def validate_zenoh_key_prefix(value: str) -> str:
     if not value.strip():
-        raise ValueError("robot_key must be a non-empty string")
+        raise ValueError("zenoh_key_prefix must be a non-empty string")
     try:
         zenoh.KeyExpr(value)
     except zenoh.ZError as error:
-        raise ValueError(f"robot_key must be a valid Zenoh key: {error}") from error
+        raise ValueError(
+            f"zenoh_key_prefix must be a valid Zenoh key: {error}"
+        ) from error
     if "*" in value:
-        raise ValueError("robot_key must not contain wildcards")
+        raise ValueError("zenoh_key_prefix must not contain wildcards")
     return value.rstrip("/")
 
 
 class DdsConfig(ConfigModel):
     domain_id: NonNegativeInt
     network_interface: StrictStr
-    rpc_timeout_seconds: PositiveFloat
     sport_mode_state_topic: StrictStr = "rt/sportmodestate"
+    first_state_timeout_seconds: PositiveFloat
+    state_freshness_seconds: PositiveFloat
 
     @field_validator("network_interface", "sport_mode_state_topic")
     @classmethod
@@ -52,29 +56,32 @@ class DdsConfig(ConfigModel):
         return value
 
 
-class StateConfig(ConfigModel):
-    startup_timeout_seconds: PositiveFloat
-    maximum_age_seconds: PositiveFloat
-    linear_velocity_quiescent_threshold: PositiveFloat
-    yaw_speed_quiescent_threshold: PositiveFloat
+class SportClientConfig(ConfigModel):
+    rpc_timeout_seconds: PositiveFloat
+
+
+class RobotStateConfig(ConfigModel):
+    quiescent_linear_speed_mps: PositiveFloat
+    quiescent_yaw_rate_rad_s: PositiveFloat
 
 
 class ControlConfig(ConfigModel):
-    velocity_deadman_seconds: PositiveFloat
+    velocity_command_timeout_seconds: PositiveFloat
     shutdown_timeout_seconds: PositiveFloat
 
 
 class NodeConfig(ConfigModel):
-    robot_key: StrictStr
-    state_heartbeat_seconds: PositiveFloat
+    zenoh_key_prefix: StrictStr
+    node_state_publish_frequency_hz: PositiveFloat
     dds: DdsConfig
-    state: StateConfig
+    sport_client: SportClientConfig
+    robot_state: RobotStateConfig
     control: ControlConfig
 
-    @field_validator("robot_key")
+    @field_validator("zenoh_key_prefix")
     @classmethod
     def validate_key(cls, value: str) -> str:
-        return validate_robot_key(value)
+        return validate_zenoh_key_prefix(value)
 
 
 class VelocityTargets(ConfigModel):
@@ -86,23 +93,23 @@ class VelocityTargets(ConfigModel):
     vyaw: Annotated[float, Field(strict=True, gt=0, le=VYAW_MAX, allow_inf_nan=False)]
 
 
-class RampRates(ConfigModel):
-    vx: PositiveFloat
-    vy: PositiveFloat
-    vyaw: PositiveFloat
+class VelocityRampRates(ConfigModel):
+    vx_mps2: PositiveFloat
+    vy_mps2: PositiveFloat
+    vyaw_rad_s2: PositiveFloat
 
 
 class KeyboardConfig(ConfigModel):
-    robot_key: StrictStr
-    publish_frequency_hz: PositiveFloat
-    state_stale_after_seconds: PositiveFloat
-    targets: VelocityTargets
-    ramp_rates: RampRates
+    zenoh_key_prefix: StrictStr
+    loop_frequency_hz: PositiveInt
+    node_state_timeout_seconds: PositiveFloat
+    velocity_targets: VelocityTargets
+    velocity_ramp_rates: VelocityRampRates
 
-    @field_validator("robot_key")
+    @field_validator("zenoh_key_prefix")
     @classmethod
     def validate_key(cls, value: str) -> str:
-        return validate_robot_key(value)
+        return validate_zenoh_key_prefix(value)
 
 
 def _load(path: Path) -> object:
