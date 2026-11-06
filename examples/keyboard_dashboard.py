@@ -1,18 +1,16 @@
-"""Pygame projection of the node's canonical State snapshot."""
+"""Pygame projection of the node's published State."""
 
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Lock
-from typing import Protocol
 
 import pygame
-from pydantic import ValidationError
+import zenoh
 
 from config import KeyboardConfig
-from controller import Keyspace, PublishedNodeState
+from wire import PublishedNodeState, RobotState
 
 WINDOW_SIZE = (920, 620)
 BACKGROUND = (20, 23, 28)
@@ -20,17 +18,7 @@ FOREGROUND = (232, 236, 241)
 ACCENT = (86, 182, 194)
 WARNING = (244, 180, 0)
 
-
-class SamplePayload(Protocol):
-    def to_bytes(self) -> bytes: ...
-
-
-class StateSample(Protocol):
-    @property
-    def payload(self) -> SamplePayload: ...
-
-    @property
-    def key_expr(self) -> object: ...
+type Color = tuple[int, int, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,39 +26,29 @@ class ReceivedNodeState:
     value: PublishedNodeState
     received_at: float
 
-    def is_stale(self, *, now: float, maximum_age_seconds: float) -> bool:
-        return now - self.received_at >= maximum_age_seconds
-
 
 class NodeStateCache:
-    """Thread-safe cache of the latest public Node State snapshot."""
+    """Thread-safe cache of the latest published Node State."""
 
-    def __init__(
-        self,
-        keyspace: Keyspace,
-        *,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self.keyspace = keyspace
-        self._clock = clock
+    def __init__(self) -> None:
         self._state: ReceivedNodeState | None = None
         self._lock = Lock()
 
-    def update(self, sample: StateSample, *, initial_reply: bool = False) -> None:
-        if str(sample.key_expr) != self.keyspace.state:
-            return
+    def update(self, sample: zenoh.Sample) -> None:
         try:
             state = PublishedNodeState.model_validate_json(sample.payload.to_bytes())
-        except (UnicodeDecodeError, ValidationError, ValueError):
+        except ValueError:
             return
         with self._lock:
-            if initial_reply and self._state is not None:
-                return
-            self._state = ReceivedNodeState(state, self._clock())
+            self._state = ReceivedNodeState(state, time.monotonic())
 
     def latest(self) -> ReceivedNodeState | None:
         with self._lock:
             return self._state
+
+
+def format_velocity(vx: float, vy: float, vyaw: float) -> str:
+    return f"vx={vx:+.3f}  vy={vy:+.3f}  vyaw={vyaw:+.3f}"
 
 
 class Dashboard:
@@ -82,149 +60,102 @@ class Dashboard:
         self._font = pygame.font.Font(None, 34)
         self._small_font = pygame.font.Font(None, 25)
 
-    def _state_lines(
-        self,
-        velocity: tuple[float, float, float],
-        *,
-        deadman: bool,
-        now: float,
-    ) -> list[tuple[pygame.font.Font, str, tuple[int, int, int]]]:
+    def _node_lines(self) -> list[tuple[str, Color]]:
         received = self._cache.latest()
         if received is None:
-            state_lines = [
-                (self._small_font, "Node State: waiting", WARNING),
-            ]
-        elif received.is_stale(
-            now=now,
-            maximum_age_seconds=self._config.node_state_timeout_seconds,
+            return [("Node State: waiting", WARNING)]
+        if (
+            time.monotonic() - received.received_at
+            >= self._config.node_state_timeout_seconds
         ):
-            state_lines = [(self._small_font, "Node State: stale", WARNING)]
-        else:
-            snapshot = received.value
-            state = snapshot.robot_state
-            velocity_text = (
-                "unknown"
-                if state.velocity is None
-                else "vx={:+.3f}  vy={:+.3f}  vz={:+.3f}  yaw={:+.3f}".format(
-                    *state.velocity,
-                    state.yaw_speed or 0.0,
-                )
+            return [("Node State: stale", WARNING)]
+
+        snapshot = received.value
+        robot = snapshot.robot_state
+        observed = (
+            "unknown"
+            if robot.velocity is None
+            else "vx={:+.3f}  vy={:+.3f}  vz={:+.3f}  yaw={:+.3f}".format(
+                *robot.velocity,
+                robot.yaw_speed or 0.0,
             )
-            requested_velocity = snapshot.requested_velocity
-            diagnostic = snapshot.last_sdk_diagnostic
-            state_lines = [
-                (
-                    self._small_font,
-                    f"Lifecycle: {snapshot.lifecycle}",
-                    FOREGROUND,
-                ),
-                (
-                    self._small_font,
-                    f"Robot State: {state.state} / {state.motion}",
-                    WARNING if state.state == "unknown" else FOREGROUND,
-                ),
-                (
-                    self._small_font,
-                    f"State reason: {state.reason or 'none'}",
-                    WARNING if state.reason else FOREGROUND,
-                ),
-                (
-                    self._small_font,
-                    "State machine: "
-                    f"{state.state_machine_code} ({state.state_machine_name})  "
-                    f"mode={state.mode} ({state.mode_name})",
-                    FOREGROUND,
-                ),
-                (self._small_font, f"Observed: {velocity_text}", FOREGROUND),
-                (
-                    self._small_font,
-                    "Requested posture: "
-                    f"{snapshot.requested_posture or 'none'}  "
-                    f"action={snapshot.last_posture_action or 'none'}",
-                    FOREGROUND,
-                ),
-                (
-                    self._small_font,
-                    "Requested velocity: "
-                    + (
-                        f"vx={requested_velocity.vx:+.3f}  "
-                        f"vy={requested_velocity.vy:+.3f}  "
-                        f"vyaw={requested_velocity.vyaw:+.3f}"
-                        if requested_velocity
-                        else "none"
-                    ),
-                    FOREGROUND,
-                ),
-                (
-                    self._small_font,
-                    "Robot connected: "
-                    f"{snapshot.robot_connected}  "
-                    f"accepting commands={snapshot.accepting_commands}",
-                    FOREGROUND,
-                ),
-                (
-                    self._small_font,
-                    "Last RPC: "
-                    + (
-                        f"{diagnostic.command} code={diagnostic.code} "
-                        f"error={diagnostic.error or 'none'}"
-                        if diagnostic
-                        else "none"
-                    ),
-                    FOREGROUND,
-                ),
-                (
-                    self._small_font,
-                    f"Node error: {snapshot.last_node_error or 'none'}",
-                    WARNING if snapshot.last_node_error else FOREGROUND,
-                ),
-            ]
+        )
+        requested = snapshot.requested_velocity
+        diagnostic = snapshot.last_sdk_diagnostic
         return [
+            (f"Lifecycle: {snapshot.lifecycle}", FOREGROUND),
             (
-                self._font,
-                f"Go2 keyboard node: {self._cache.keyspace.prefix}",
-                ACCENT,
+                f"Robot State: {robot.state} / {robot.motion}",
+                WARNING if robot.state is RobotState.UNKNOWN else FOREGROUND,
             ),
+            (
+                f"State reason: {robot.reason or 'none'}",
+                WARNING if robot.reason else FOREGROUND,
+            ),
+            (
+                f"State machine: {robot.state_machine_code} "
+                f"({robot.state_machine_name})  "
+                f"mode={robot.mode} ({robot.mode_name})",
+                FOREGROUND,
+            ),
+            (f"Observed: {observed}", FOREGROUND),
+            (
+                f"Requested posture: {snapshot.requested_posture or 'none'}  "
+                f"action={snapshot.last_posture_action or 'none'}",
+                FOREGROUND,
+            ),
+            (
+                "Requested velocity: "
+                + (
+                    format_velocity(requested.vx, requested.vy, requested.vyaw)
+                    if requested
+                    else "none"
+                ),
+                FOREGROUND,
+            ),
+            (
+                f"Robot connected: {snapshot.robot_connected}  "
+                f"accepting commands={snapshot.accepting_commands}",
+                FOREGROUND,
+            ),
+            (
+                "Last RPC: "
+                + (
+                    f"{diagnostic.command} code={diagnostic.code} "
+                    f"error={diagnostic.error or 'none'}"
+                    if diagnostic
+                    else "none"
+                ),
+                FOREGROUND,
+            ),
+            (
+                f"Node error: {snapshot.last_node_error or 'none'}",
+                WARNING if snapshot.last_node_error else FOREGROUND,
+            ),
+        ]
+
+    def draw(self, velocity: tuple[float, float, float], *, deadman: bool) -> None:
+        small_lines = [
+            (f"Local command: {format_velocity(*velocity)}", FOREGROUND),
+            *self._node_lines(),
+            ("Shift+W/S: vx   Shift+A/D: vy   Shift+Q/E: yaw", FOREGROUND),
+            (
+                "Shift+R: stand   Shift+F: down   Space: zero   Esc: zero and exit",
+                FOREGROUND,
+            ),
+        ]
+        lines = [
+            (self._font, f"Go2 keyboard node: {self._config.zenoh_key_prefix}", ACCENT),
             (
                 self._font,
                 f"Deadman: {'ACTIVE' if deadman else 'released'}",
                 ACCENT if deadman else WARNING,
             ),
-            (
-                self._small_font,
-                "Local command: "
-                f"vx={velocity[0]:+.3f}  vy={velocity[1]:+.3f}  "
-                f"vyaw={velocity[2]:+.3f}",
-                FOREGROUND,
-            ),
-            *state_lines,
-            (
-                self._small_font,
-                "Shift+W/S: vx   Shift+A/D: vy   Shift+Q/E: yaw",
-                FOREGROUND,
-            ),
-            (
-                self._small_font,
-                "Shift+R: stand   Shift+F: down   Space: zero   Esc: zero and exit",
-                FOREGROUND,
-            ),
+            *((self._small_font, text, color) for text, color in small_lines),
         ]
-
-    def draw(
-        self,
-        velocity: tuple[float, float, float],
-        *,
-        deadman: bool,
-        now: float | None = None,
-    ) -> None:
-        now = time.monotonic() if now is None else now
         self._screen.fill(BACKGROUND)
         y = 18
-        for font, text, color in self._state_lines(
-            velocity,
-            deadman=deadman,
-            now=now,
-        ):
+        for font, text, color in lines:
             rendered = font.render(text, True, color)
             self._screen.blit(rendered, (20, y))
             y += rendered.get_height() + 10

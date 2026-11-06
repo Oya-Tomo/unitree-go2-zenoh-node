@@ -13,13 +13,16 @@ from controller import (
     Controller,
     Go2MotionStateMachine,
     Go2SportMode,
-    PostureCommand,
-    PublishedNodeState,
     RobotObservation,
-    VelocityCommand,
-    decode_command,
 )
-from node import ZenohStateBus, next_publish_deadline, to_observation
+from node import next_publish_deadline, serve_zenoh, to_observation
+from wire import (
+    Keyspace,
+    PostureCommand,
+    PostureTarget,
+    PublishedNodeState,
+    VelocityCommand,
+)
 
 
 @dataclass(frozen=True)
@@ -90,15 +93,15 @@ class BlockingPublisher(FakeResource):
 class FakeSession:
     def __init__(self) -> None:
         self.publisher = BlockingPublisher()
-        self.command_callback: Callable[[Any], None] | None = None
+        self.subscriber_callbacks: dict[str, Callable[[Any], None]] = {}
         self.query_callback: Callable[[Any], None] | None = None
 
     def declare_subscriber(
         self,
-        _key: str,
+        key: str,
         callback: Callable[[Any], None],
     ) -> FakeResource:
-        self.command_callback = callback
+        self.subscriber_callbacks[key] = callback
         return FakeResource()
 
     def declare_queryable(
@@ -131,6 +134,7 @@ class FakePayload:
 @dataclass(frozen=True)
 class FakeSample:
     payload: FakePayload
+    key_expr: str = ""
 
 
 class FakeQuery:
@@ -148,13 +152,33 @@ class FakeQuery:
 
 
 class NodeBoundaryTests(unittest.TestCase):
-    def test_wire_contract_has_only_velocity_and_posture(self) -> None:
-        velocity = decode_command(b'{"type":"velocity","vx":0.1,"vy":0.0,"vyaw":-0.2}')
-        posture = decode_command(b'{"type":"posture","posture":"down"}')
-        self.assertIsInstance(velocity, VelocityCommand)
-        self.assertIsInstance(posture, PostureCommand)
-        with self.assertRaises(ValidationError):
-            decode_command(b'{"type":"stop"}')
+    def test_each_command_key_accepts_only_its_own_payload(self) -> None:
+        keyspace = Keyspace("unitree/go2")
+        self.assertEqual(keyspace.velocity, "unitree/go2/command/velocity")
+        self.assertEqual(keyspace.posture, "unitree/go2/command/posture")
+        self.assertEqual(keyspace.state, "unitree/go2/state")
+
+        velocity = VelocityCommand.model_validate_json(
+            b'{"vx":0.1,"vy":0.0,"vyaw":-0.2}'
+        )
+        posture = PostureCommand.model_validate_json(b'{"posture":"down"}')
+        self.assertEqual((velocity.vx, velocity.vy, velocity.vyaw), (0.1, 0.0, -0.2))
+        self.assertIs(posture.posture, PostureTarget.DOWN)
+
+        rejected = (
+            (VelocityCommand, b'{"type":"velocity","vx":0.1,"vy":0.0,"vyaw":0.0}'),
+            (VelocityCommand, b'{"posture":"down"}'),
+            (VelocityCommand, b'{"vx":"0.1","vy":0.0,"vyaw":0.0}'),
+            (PostureCommand, b'{"type":"posture","posture":"down"}'),
+            (PostureCommand, b'{"vx":0.1,"vy":0.0,"vyaw":0.0}'),
+            (PostureCommand, b'{"posture":"stop"}'),
+        )
+        for model, payload in rejected:
+            with (
+                self.subTest(model=model.__name__, payload=payload),
+                self.assertRaises(ValidationError),
+            ):
+                model.model_validate_json(payload)
 
     def test_state_conversion_uses_the_full_velocity_vector(self) -> None:
         observation = to_observation(FakeState(), received_at=1.5)
@@ -197,22 +221,25 @@ class NodeBoundaryTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            controller.process_observation(after=None),
+            controller.step(after=None, timeout=0.0),
             first_received_at,
         )
 
         session = FakeSession()
         self.addCleanup(session.publisher.release.set)
-        with ZenohStateBus(
+        keyspace = Keyspace("unitree/go2")
+        with serve_zenoh(
             session,  # type: ignore[arg-type]
-            "unitree/go2",
+            keyspace,
             controller,
             state_publish_frequency_hz=1.0,
         ):
             self.assertTrue(session.publisher.started.wait(timeout=1.0))
-            command_callback = session.command_callback
-            assert command_callback is not None
-            command_callback(
+            self.assertEqual(
+                set(session.subscriber_callbacks),
+                {keyspace.velocity, keyspace.posture},
+            )
+            session.subscriber_callbacks[keyspace.velocity](
                 FakeSample(
                     FakePayload(
                         VelocityCommand(
@@ -240,7 +267,7 @@ class NodeBoundaryTests(unittest.TestCase):
                 )
             )
             self.assertEqual(
-                controller.process_observation(after=first_received_at),
+                controller.step(after=first_received_at, timeout=0.0),
                 next_received_at,
             )
             self.assertEqual(client.calls, [("Move", 0.5, 0.0, 0.0)])
@@ -252,6 +279,18 @@ class NodeBoundaryTests(unittest.TestCase):
             self.assertEqual(len(query.replies), 1)
             state = PublishedNodeState.model_validate_json(query.replies[0][1])
             self.assertTrue(state.robot_connected)
+
+            posture_callback = session.subscriber_callbacks[keyspace.posture]
+            with self.assertLogs("node", level="WARNING"):
+                posture_callback(
+                    FakeSample(FakePayload(b'{"vx":0.0,"vy":0.0,"vyaw":0.0}'))
+                )
+            self.assertIsNone(controller.published_state().requested_posture)
+            posture_callback(FakeSample(FakePayload(b'{"posture":"down"}')))
+            self.assertIs(
+                controller.published_state().requested_posture,
+                PostureTarget.DOWN,
+            )
 
             session.publisher.release.set()
 

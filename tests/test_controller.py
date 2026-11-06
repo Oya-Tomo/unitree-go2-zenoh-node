@@ -9,17 +9,19 @@ from controller import (
     Controller,
     Go2MotionStateMachine,
     Go2SportMode,
+    RobotObservation,
+    classify,
+)
+from wire import (
     Lifecycle,
     Motion,
     PostureCommand,
     PostureTarget,
     PublishedNodeState,
-    RobotObservation,
     RobotState,
     SdkCommand,
     UnknownReason,
     VelocityCommand,
-    classify_state,
 )
 
 
@@ -82,7 +84,7 @@ class Harness:
     def __init__(self, client: FakeClient | None = None) -> None:
         self.clock = Clock()
         self.client = client if client is not None else FakeClient()
-        self.last_processed_received_at: float | None = None
+        self.consumed: float | None = None
         self.controller = Controller(
             self.client,
             state_freshness_seconds=0.2,
@@ -124,11 +126,12 @@ class Harness:
                 yaw_speed=yaw_speed,
             )
         )
-        processed_at = self.controller.process_observation(
-            after=self.last_processed_received_at,
-        )
-        if processed_at is not None:
-            self.last_processed_received_at = processed_at
+        self.step()
+
+    def step(self) -> None:
+        """Run one control step without waiting, as the node's control worker does."""
+
+        self.consumed = self.controller.step(after=self.consumed, timeout=0.0)
 
     def next_state(self, mode: Go2SportMode, **kwargs: object) -> None:
         self.clock.advance()
@@ -168,7 +171,7 @@ class ControllerTests(unittest.TestCase):
 
         for machine, sport_mode, vx, expected in cases:
             with self.subTest(machine=machine, mode=sport_mode, vx=vx):
-                state = classify_state(
+                robot, motion = classify(
                     RobotObservation(
                         received_at=1.0,
                         stamp_sec=2,
@@ -181,9 +184,9 @@ class ControllerTests(unittest.TestCase):
                     quiescent_linear_speed_mps=0.03,
                     quiescent_yaw_rate_rad_s=0.05,
                 )
-                self.assertEqual(state.state, expected)
+                self.assertEqual(robot, expected)
                 self.assertEqual(
-                    state.motion,
+                    motion,
                     Motion.MOVING if vx > 0.03 else Motion.QUIESCENT,
                 )
 
@@ -211,7 +214,7 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(harness.velocity(0.5))
 
         harness.clock.advance(0.2)
-        harness.controller.enforce_observation_freshness()
+        harness.step()
         self.assertFalse(harness.latest.robot_connected)
         self.assertEqual(harness.latest.robot_state.state, RobotState.UNKNOWN)
         self.assertEqual(harness.latest.robot_state.reason, UnknownReason.STALE)
@@ -234,7 +237,6 @@ class ControllerTests(unittest.TestCase):
             UnknownReason.NO_SAMPLE,
         )
         self.assertEqual(harness.latest.last_node_error, "bad startup sample")
-        self.assertFalse(harness.controller.has_observation)
 
         harness.state(Go2SportMode.IDLE)
         harness.clock.advance(0.19)
@@ -242,7 +244,7 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(harness.latest.robot_connected)
 
         harness.clock.advance(0.01)
-        harness.controller.enforce_observation_freshness()
+        harness.step()
         self.assertFalse(harness.latest.robot_connected)
 
     def test_moving_agile_accepts_and_executes_latest_velocity(self) -> None:
@@ -292,9 +294,7 @@ class ControllerTests(unittest.TestCase):
         processed: list[float | None] = []
         worker = Thread(
             target=lambda: processed.append(
-                harness.controller.process_observation(
-                    after=harness.last_processed_received_at,
-                )
+                harness.controller.step(after=harness.consumed, timeout=0.0)
             )
         )
         worker.start()
@@ -329,8 +329,8 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(processed, [blocked_at])
 
-        processed_at = harness.controller.process_observation(after=blocked_at)
-        self.assertEqual(processed_at, newest_received_at)
+        consumed = harness.controller.step(after=blocked_at, timeout=0.0)
+        self.assertEqual(consumed, newest_received_at)
         self.assertEqual(len(client.calls), 2)
 
     def test_velocity_illegal_in_current_state_is_not_delayed(self) -> None:
@@ -564,7 +564,7 @@ class ControllerTests(unittest.TestCase):
         harness.clock.advance(0.2)
 
         self.assertEqual(
-            harness.controller.process_observation(after=0.9),
+            harness.controller.step(after=0.9, timeout=0.0),
             1.0,
         )
         self.assertEqual(harness.client.calls, [])

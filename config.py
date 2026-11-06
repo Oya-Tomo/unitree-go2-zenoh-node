@@ -8,52 +8,53 @@ from typing import Annotated
 import json5
 import zenoh
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
-    StrictStr,
-    ValidationInfo,
-    field_validator,
+    NonNegativeInt,
+    PositiveFloat,
+    PositiveInt,
 )
 
-from controller import VX_MAX, VX_MIN, VY_MAX, VYAW_MAX
+from wire import VX_MAX, VX_MIN, VY_MAX, VYAW_MAX
 
-NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
-PositiveInt = Annotated[int, Field(strict=True, gt=0)]
-PositiveFloat = Annotated[float, Field(strict=True, gt=0, allow_inf_nan=False)]
+
+def _non_blank(value: str) -> str:
+    if not value.strip():
+        raise ValueError("must be a non-empty string")
+    return value
+
+
+def _key_prefix(value: str) -> str:
+    try:
+        zenoh.KeyExpr(_non_blank(value))
+    except zenoh.ZError as error:
+        raise ValueError(f"must be a valid Zenoh key: {error}") from error
+    if "*" in value:
+        raise ValueError("must not contain wildcards")
+    return value
+
+
+NonBlankStr = Annotated[str, AfterValidator(_non_blank)]
+KeyPrefix = Annotated[str, AfterValidator(_key_prefix)]
 
 
 class ConfigModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-
-def validate_zenoh_key_prefix(value: str) -> str:
-    if not value.strip():
-        raise ValueError("zenoh_key_prefix must be a non-empty string")
-    try:
-        zenoh.KeyExpr(value)
-    except zenoh.ZError as error:
-        raise ValueError(
-            f"zenoh_key_prefix must be a valid Zenoh key: {error}"
-        ) from error
-    if "*" in value:
-        raise ValueError("zenoh_key_prefix must not contain wildcards")
-    return value.rstrip("/")
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        strict=True,
+        allow_inf_nan=False,
+    )
 
 
 class DdsConfig(ConfigModel):
     domain_id: NonNegativeInt
-    network_interface: StrictStr
-    sport_mode_state_topic: StrictStr = "rt/sportmodestate"
+    network_interface: NonBlankStr
+    sport_mode_state_topic: NonBlankStr = "rt/sportmodestate"
     first_state_timeout_seconds: PositiveFloat
     state_freshness_seconds: PositiveFloat
-
-    @field_validator("network_interface", "sport_mode_state_topic")
-    @classmethod
-    def validate_non_empty(cls, value: str, info: ValidationInfo) -> str:
-        if not value.strip():
-            raise ValueError(f"{info.field_name} must be a non-empty string")
-        return value
 
 
 class SportClientConfig(ConfigModel):
@@ -71,26 +72,18 @@ class ControlConfig(ConfigModel):
 
 
 class NodeConfig(ConfigModel):
-    zenoh_key_prefix: StrictStr
+    zenoh_key_prefix: KeyPrefix
     node_state_publish_frequency_hz: PositiveFloat
     dds: DdsConfig
     sport_client: SportClientConfig
     robot_state: RobotStateConfig
     control: ControlConfig
 
-    @field_validator("zenoh_key_prefix")
-    @classmethod
-    def validate_key(cls, value: str) -> str:
-        return validate_zenoh_key_prefix(value)
-
 
 class VelocityTargets(ConfigModel):
-    vx: Annotated[
-        float,
-        Field(strict=True, gt=0, le=min(abs(VX_MIN), VX_MAX), allow_inf_nan=False),
-    ]
-    vy: Annotated[float, Field(strict=True, gt=0, le=VY_MAX, allow_inf_nan=False)]
-    vyaw: Annotated[float, Field(strict=True, gt=0, le=VYAW_MAX, allow_inf_nan=False)]
+    vx: Annotated[PositiveFloat, Field(le=min(-VX_MIN, VX_MAX))]
+    vy: Annotated[PositiveFloat, Field(le=VY_MAX)]
+    vyaw: Annotated[PositiveFloat, Field(le=VYAW_MAX)]
 
 
 class VelocityRampRates(ConfigModel):
@@ -100,26 +93,13 @@ class VelocityRampRates(ConfigModel):
 
 
 class KeyboardConfig(ConfigModel):
-    zenoh_key_prefix: StrictStr
+    zenoh_key_prefix: KeyPrefix
     loop_frequency_hz: PositiveInt
     node_state_timeout_seconds: PositiveFloat
     velocity_targets: VelocityTargets
     velocity_ramp_rates: VelocityRampRates
 
-    @field_validator("zenoh_key_prefix")
-    @classmethod
-    def validate_key(cls, value: str) -> str:
-        return validate_zenoh_key_prefix(value)
 
-
-def _load(path: Path) -> object:
+def load_config[M: ConfigModel](model: type[M], path: Path) -> M:
     with path.open(encoding="utf-8") as stream:
-        return json5.load(stream)
-
-
-def load_node_config(path: Path) -> NodeConfig:
-    return NodeConfig.model_validate(_load(path))
-
-
-def load_keyboard_config(path: Path) -> KeyboardConfig:
-    return KeyboardConfig.model_validate(_load(path))
+        return model.model_validate(json5.load(stream))
