@@ -39,4 +39,5 @@ $ uv run examples/keyboard.py
 - [使い方・操作・wire contract](docs/ja/usage.md)
 - [観測State制御のADR](docs/adr/0001-observed-state-driven-control-architecture.md)
 - [共有Node State concurrencyのADR](docs/adr/0002-shared-node-state-concurrency.md)
+- [wire moduleとcommand keyのADR](docs/adr/0003-wire-module-and-command-keys.md)
 - [English documentation](README.md)

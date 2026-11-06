@@ -39,4 +39,5 @@ See [Usage](docs/en/usage.md) before sending commands to the robot.
 - [Usage, controls, and wire contracts](docs/en/usage.md)
 - [Observed-State control ADR](docs/adr/0001-observed-state-driven-control-architecture.md)
 - [Shared Node State concurrency ADR](docs/adr/0002-shared-node-state-concurrency.md)
+- [Wire module and command keys ADR](docs/adr/0003-wire-module-and-command-keys.md)
 - [日本語ドキュメント](README_ja.md)

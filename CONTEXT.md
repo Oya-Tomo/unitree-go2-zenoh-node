@@ -37,7 +37,7 @@ It is not an estimated posture.
 
 ## Command intake
 
-One global gate shared by posture and velocity commands.
+One global gate shared by posture and velocity commands, which arrive on their own keys, `{zenoh_key_prefix}/command/velocity` and `{zenoh_key_prefix}/command/posture`.
 It is open while DDS State is fresh, the node is not waiting after a posture RPC, and shutdown has not begun.
 Robot State determines whether a buffered command is legal when the next State drives the control loop; an illegal command is discarded.
 

@@ -151,6 +151,7 @@ Shiftは移動のdeadmanであり、姿勢requestを送るときにも必要で�
 keyboardはローカル速度を設定目標へrampさせます。
 実行中は現在速度を各更新でpublishします。
 姿勢requestは対応するkey-down eventで1回だけpublishし、retryしません。
+起動時にnodeへqueryはしません。次の定期Node Stateが届くまで、dashboardは`waiting`を表示します。
 
 ## Zenoh keyとcommand contract
 
@@ -158,13 +159,19 @@ keyboardはローカル速度を設定目標へrampさせます。
 
 | Key | 方向 | 内容 |
 | --- | --- | --- |
-| `unitree/go2/command` | keyboard/clientからnode | 速度または姿勢のJSON |
+| `unitree/go2/command/velocity` | keyboard/clientからnode | 速度commandのJSON |
+| `unitree/go2/command/posture` | keyboard/clientからnode | 姿勢commandのJSON |
 | `unitree/go2/state` | nodeからobserver | canonical Node State JSON。Zenoh `get`でも取得可能 |
+
+commandの種類ごとにkeyを分けているので、Zenohのdownsampling、QoS overwrite、access controlのruleを速度と姿勢に別々に設定できます。
+payloadは対応するkeyでだけ受け付けます。`type` fieldや別のcommandのfieldを含むpayloadは拒否します。
 
 ### 速度command
 
+Key: `{zenoh_key_prefix}/command/velocity`
+
 ```json
-{"type":"velocity","vx":0.5,"vy":0.0,"vyaw":0.2}
+{"vx":0.5,"vy":0.0,"vyaw":0.2}
 ```
 
 | Field | 範囲 |
@@ -177,12 +184,14 @@ keyboardは速度をdrop congestion control、best-effort reliabilityでpublish�
 
 ### 姿勢command
 
+Key: `{zenoh_key_prefix}/command/posture`
+
 ```json
-{"type":"posture","posture":"stand"}
+{"posture":"stand"}
 ```
 
 ```json
-{"type":"posture","posture":"down"}
+{"posture":"down"}
 ```
 
 姿勢値は`stand`と`down`だけです。
@@ -207,7 +216,7 @@ Zenoh `get`は最新のcoherentなNode Stateから直接replyを生成します�
 | `robot_state` | 最新の分類済みrobot observation、またはUnknown State |
 | `accepting_commands` | 速度と姿勢の両方に共通する単一のingress gate |
 | `requested_posture` | 最新のbuffer中または実行中の姿勢target。なければ`null` |
-| `requested_velocity` | 最新のbuffer中速度。なければ`null` |
+| `requested_velocity` | 最新のbuffer中速度（`{"vx","vy","vyaw"}`）。なければ`null` |
 | `last_posture_action` | active workflowで最後に送った姿勢SDK step。なければ`null` |
 | `last_sdk_diagnostic` | 最新のSDK command診断。なければ`null` |
 | `last_node_error` | 最新のnode-level input errorまたはshutdown error。なければ`null` |
@@ -231,7 +240,7 @@ Zenoh `get`は最新のcoherentなNode Stateから直接replyを生成します�
 
 ### SDK診断field
 
-`last_sdk_diagnostic`は`command`、任意の`velocity`、任意の整数`code`、任意の`error`を含みます。
+`last_sdk_diagnostic`は`command`、任意の`velocity`（`move`の場合は`{"vx","vy","vyaw"}`）、任意の整数`code`、任意の`error`を含みます。
 0以外のSDK codeは報告されますが、Robot Stateを確定させず、遷移も進めません。
 特に`StopMove()`が`-1`を返しても診断に留まり、次に観測したStateが実行可能な処理を決めます。
 
@@ -250,7 +259,7 @@ Zenoh `get`は最新のcoherentなNode Stateから直接replyを生成します�
 計測motionによって、移動可能なReady standまたはLocomotionを別Stateへ変えることはありません。
 motionは、静止したCrouchをDownと確認するためと、`StopMove()`から`StandDown()`まで静止を待つためだけに使います。
 
-action tableとconcurrencyのdecisionは[ADR-0001](../adr/0001-observed-state-driven-control-architecture.md)と[ADR-0002](../adr/0002-shared-node-state-concurrency.md)を参照してください。
+action tableとconcurrencyのdecisionは[ADR-0001](../adr/0001-observed-state-driven-control-architecture.md)と[ADR-0002](../adr/0002-shared-node-state-concurrency.md)、module境界とcommand keyのdecisionは[ADR-0003](../adr/0003-wire-module-and-command-keys.md)を参照してください。
 
 ## Timingと実行方式
 
