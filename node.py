@@ -4,36 +4,27 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import signal
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from threading import Condition, Event, Lock
+from threading import Event, Thread
 from types import FrameType
 from typing import Any, Protocol
 
 import zenoh
-from pydantic import ValidationError
 
-from config import NodeConfig, load_node_config
-from controller import (
-    JSON_ENCODING,
-    CommandBuffer,
-    Controller,
-    Keyspace,
-    NodeState,
-    PostureCommand,
-    RobotObservation,
-    SportClientProtocol,
-    VelocityCommand,
-    decode_command,
-)
+from config import NodeConfig, load_config
+from controller import Controller, RobotObservation, SportClientProtocol
+from wire import JSON_ENCODING, Keyspace, PostureCommand, VelocityCommand
 
 DEFAULT_NODE_CONFIG_PATH = Path("config/node-config.json5")
 DEFAULT_ZENOH_CONFIG_PATH = Path("config/zenoh-config.json5")
-STATE_POLL_SECONDS = 0.05
+CONTROL_WAIT_MAX_SECONDS = 0.05
+PUBLISHER_JOIN_TIMEOUT_SECONDS = 1.0
 LOGGER = logging.getLogger(__name__)
 
 
@@ -103,121 +94,93 @@ def to_observation(
     )
 
 
-@dataclass(frozen=True, slots=True)
-class StateEvent:
-    observation: RobotObservation | None = None
-    error: str | None = None
+def next_publish_deadline(
+    deadline: float,
+    *,
+    now: float,
+    period_seconds: float,
+) -> float:
+    """Advance an absolute periodic deadline without replaying missed periods."""
+
+    elapsed_periods = max(1, math.floor((now - deadline) / period_seconds) + 1)
+    return deadline + elapsed_periods * period_seconds
 
 
-class StateInbox:
-    """Expose only the newest unprocessed State to the control loop."""
+@contextmanager
+def serve_zenoh(
+    session: zenoh.Session,
+    keyspace: Keyspace,
+    controller: Controller,
+    *,
+    state_publish_frequency_hz: float,
+) -> Iterator[None]:
+    """Serve command intake, State queries, and periodic State publication."""
 
-    def __init__(self) -> None:
-        self._condition = Condition()
-        self._revision = 0
-        self._event: StateEvent | None = None
+    stop = Event()
 
-    def put(self, event: StateEvent) -> None:
-        with self._condition:
-            self._revision += 1
-            self._event = event
-            self._condition.notify()
-
-    def wait_after(
-        self,
-        revision: int,
-        *,
-        timeout: float,
-    ) -> tuple[int, StateEvent] | None:
-        with self._condition:
-            self._condition.wait_for(
-                lambda: self._revision > revision,
-                timeout=timeout,
-            )
-            if self._revision <= revision or self._event is None:
-                return None
-            return (self._revision, self._event)
-
-
-class ZenohStateBus:
-    """Own Zenoh command ingress and the single public State key."""
-
-    def __init__(
-        self,
-        session: zenoh.Session,
-        robot_key: str,
-        commands: CommandBuffer,
+    def on_command(
+        model: type[VelocityCommand] | type[PostureCommand],
+        sample: zenoh.Sample,
     ) -> None:
-        self._session = session
-        self._keyspace = Keyspace(robot_key)
-        self._commands = commands
-        self._payload: str | None = None
-        self._payload_lock = Lock()
-        self._command_lock = Lock()
-        self._resources = ExitStack()
-
-    def __enter__(self) -> ZenohStateBus:
+        received_at = time.monotonic()
         try:
-            self._resources.enter_context(
-                self._session.declare_subscriber(
-                    self._keyspace.command,
-                    self._on_command,
-                )
-            )
-            self._resources.enter_context(
-                self._session.declare_queryable(
-                    self._keyspace.state,
-                    self._reply,
-                    complete=True,
-                )
-            )
-        except Exception:
-            self._resources.close()
-            raise
-        return self
+            command = model.model_validate_json(sample.payload.to_bytes())
+        except ValueError as error:
+            LOGGER.warning("Rejected invalid command on %s: %s", sample.key_expr, error)
+            return
+        if not controller.receive_command(command, received_at=received_at):
+            LOGGER.debug("Ignored command while command intake is closed")
 
-    def __exit__(self, *_exc_info: object) -> None:
-        self._resources.close()
-
-    def publish(self, state: NodeState) -> None:
-        payload = state.model_dump_json()
-        with self._payload_lock:
-            self._payload = payload
-        self._session.put(
-            self._keyspace.state,
-            payload,
-            encoding=JSON_ENCODING,
-        )
-
-    def _reply(self, query: zenoh.Query) -> None:
+    def reply(query: zenoh.Query) -> None:
         with query:
-            with self._payload_lock:
-                payload = self._payload
-            if payload is not None:
-                query.reply(
-                    self._keyspace.state,
-                    payload,
-                    encoding=JSON_ENCODING,
-                )
+            payload = controller.published_state().model_dump_json()
+            query.reply(keyspace.state, payload, encoding=JSON_ENCODING)
 
-    def _on_command(self, sample: zenoh.Sample) -> None:
-        with self._command_lock:
-            received_at = time.monotonic()
+    def publish_periodically(publisher: zenoh.Publisher) -> None:
+        period_seconds = 1.0 / state_publish_frequency_hz
+        deadline = time.monotonic()
+        while True:
+            stopping = stop.wait(max(0.0, deadline - time.monotonic()))
             try:
-                command = decode_command(sample.payload.to_bytes())
-            except (UnicodeDecodeError, ValidationError, ValueError) as error:
-                LOGGER.warning("Rejected invalid Zenoh command: %s", error)
+                publisher.put(controller.published_state().model_dump_json())
+            except Exception as error:
+                LOGGER.error("Failed to publish Node State: %s", error)
+            if stopping:
                 return
-            if isinstance(command, VelocityCommand):
-                accepted = self._commands.update_velocity(
-                    command,
-                    received_at=received_at,
-                )
-            else:
-                assert isinstance(command, PostureCommand)
-                accepted = self._commands.update_posture(command)
-            if not accepted:
-                LOGGER.debug("Ignored command while command input is disabled")
+            deadline = next_publish_deadline(
+                deadline,
+                now=time.monotonic(),
+                period_seconds=period_seconds,
+            )
+
+    with ExitStack() as resources:
+        for key, model in (
+            (keyspace.velocity, VelocityCommand),
+            (keyspace.posture, PostureCommand),
+        ):
+            resources.enter_context(
+                session.declare_subscriber(key, partial(on_command, model))
+            )
+        resources.enter_context(
+            session.declare_queryable(keyspace.state, reply, complete=True)
+        )
+        publisher = resources.enter_context(
+            session.declare_publisher(keyspace.state, encoding=JSON_ENCODING)
+        )
+        publisher_thread = Thread(
+            target=publish_periodically,
+            args=(publisher,),
+            name="node-state-publisher",
+            daemon=True,
+        )
+        publisher_thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            publisher_thread.join(timeout=PUBLISHER_JOIN_TIMEOUT_SECONDS)
+            if publisher_thread.is_alive():
+                LOGGER.error("Timed out stopping the Node State publisher")
 
 
 def create_unitree_resources(
@@ -235,7 +198,7 @@ def create_unitree_resources(
         config.dds.network_interface,
     )
     client = SportClient()
-    client.SetTimeout(config.dds.rpc_timeout_seconds)
+    client.SetTimeout(config.sport_client.rpc_timeout_seconds)
     client.Init()
     subscriber = ChannelSubscriber(
         config.dds.sport_mode_state_topic,
@@ -261,84 +224,75 @@ def stop_on_signals(stop_event: Event) -> Iterator[None]:
             signal.signal(signum, handler)
 
 
-def process_state_event(controller: Controller, event: StateEvent) -> None:
-    if event.observation is not None:
-        controller.on_state(event.observation)
-    else:
-        controller.reject_state(event.error or "invalid SportModeState")
-
-
 def run(zenoh_config: zenoh.Config, node_config: NodeConfig) -> None:
     zenoh.init_log_from_env_or("error")
-    commands = CommandBuffer()
-    states = StateInbox()
     stop_event = Event()
+    keyspace = Keyspace(node_config.zenoh_key_prefix)
     client, subscriber = create_unitree_resources(node_config)
+    controller = Controller(
+        client,
+        state_freshness_seconds=node_config.dds.state_freshness_seconds,
+        quiescent_linear_speed_mps=node_config.robot_state.quiescent_linear_speed_mps,
+        quiescent_yaw_rate_rad_s=node_config.robot_state.quiescent_yaw_rate_rad_s,
+        velocity_command_timeout_seconds=(
+            node_config.control.velocity_command_timeout_seconds
+        ),
+    )
 
     def on_state(message: SportModeStateLike) -> None:
+        received_at = time.monotonic()
         try:
-            event = StateEvent(
-                observation=to_observation(
-                    message,
-                    received_at=time.monotonic(),
-                )
-            )
+            observation = to_observation(message, received_at=received_at)
         except (TypeError, ValueError) as error:
-            event = StateEvent(error=f"Invalid SportModeState: {error}")
-        states.put(event)
+            controller.reject_observation(f"Invalid SportModeState: {error}")
+        else:
+            controller.receive_observation(observation)
 
     with (
         zenoh.open(zenoh_config) as session,
-        ZenohStateBus(session, node_config.robot_key, commands) as state_bus,
+        serve_zenoh(
+            session,
+            keyspace,
+            controller,
+            state_publish_frequency_hz=node_config.node_state_publish_frequency_hz,
+        ),
         stop_on_signals(stop_event),
+        ExitStack() as dds,
     ):
-        controller = Controller(
-            client,
-            commands,
-            state_bus,
-            maximum_state_age_seconds=node_config.state.maximum_age_seconds,
-            linear_velocity_quiescent_threshold=(
-                node_config.state.linear_velocity_quiescent_threshold
-            ),
-            yaw_speed_quiescent_threshold=(
-                node_config.state.yaw_speed_quiescent_threshold
-            ),
-            velocity_deadman_seconds=node_config.control.velocity_deadman_seconds,
-        )
-        subscriber.Init(on_state, queueLen=1)
-        revision = 0
-        started = False
-        next_heartbeat = time.monotonic()
+        # The newest consumed observation; None until control has started.
+        consumed: float | None = None
+        run_error: str | None = None
         try:
+            subscriber.Init(on_state, queueLen=1)
+            dds.callback(subscriber.Close)
             startup_deadline = (
-                time.monotonic() + node_config.state.startup_timeout_seconds
+                time.monotonic() + node_config.dds.first_state_timeout_seconds
             )
-            while not stop_event.is_set() and not controller.has_state:
+            while consumed is None and not stop_event.is_set():
                 remaining = startup_deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeError("Timed out waiting for SportModeState")
-                received = states.wait_after(
-                    revision,
-                    timeout=min(STATE_POLL_SECONDS, remaining),
+                consumed = controller.step(
+                    after=None,
+                    timeout=min(CONTROL_WAIT_MAX_SECONDS, remaining),
                 )
-                if received is not None:
-                    revision, event = received
-                    process_state_event(controller, event)
-
-            started = controller.has_state
-            LOGGER.info("Listening for commands on %s/command", node_config.robot_key)
-            while not stop_event.is_set():
-                received = states.wait_after(revision, timeout=STATE_POLL_SECONDS)
-                if received is not None:
-                    revision, event = received
-                    process_state_event(controller, event)
-                controller.expire_state()
-                now = time.monotonic()
-                if now >= next_heartbeat:
-                    controller.publish()
-                    next_heartbeat = now + node_config.state_heartbeat_seconds
+            if consumed is not None:
+                LOGGER.info(
+                    "Listening for commands on %s and %s",
+                    keyspace.velocity,
+                    keyspace.posture,
+                )
+                while not stop_event.is_set():
+                    consumed = controller.step(
+                        after=consumed,
+                        timeout=CONTROL_WAIT_MAX_SECONDS,
+                    )
+        except Exception as error:
+            run_error = str(error)
+            raise
         finally:
-            if started:
+            shutdown_error: str | None = None
+            if consumed is not None:
                 controller.begin_shutdown()
                 shutdown_deadline = (
                     time.monotonic() + node_config.control.shutdown_timeout_seconds
@@ -347,32 +301,25 @@ def run(zenoh_config: zenoh.Config, node_config: NodeConfig) -> None:
                     not controller.shutdown_complete
                     and time.monotonic() < shutdown_deadline
                 ):
-                    received = states.wait_after(
-                        revision,
-                        timeout=STATE_POLL_SECONDS,
+                    consumed = controller.step(
+                        after=consumed,
+                        timeout=CONTROL_WAIT_MAX_SECONDS,
                     )
-                    if received is not None:
-                        revision, event = received
-                        process_state_event(controller, event)
-                shutdown_error = (
-                    None
-                    if controller.shutdown_complete
-                    else "Shutdown timed out before State confirmed down"
-                )
-                controller.finish_shutdown(shutdown_error)
-            subscriber.Close()
+                if not controller.shutdown_complete:
+                    shutdown_error = "Shutdown timed out before State confirmed down"
+            controller.finish_shutdown(run_error or shutdown_error)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     try:
-        node_config = load_node_config(args.node_config)
+        node_config = load_config(NodeConfig, args.node_config)
         zenoh_config = zenoh.Config.from_file(args.zenoh_config)
         run(zenoh_config, node_config)
     except KeyboardInterrupt:
         LOGGER.info("Stopped")
-    except (OSError, RuntimeError, ValueError, ValidationError, zenoh.ZError) as error:
+    except (OSError, RuntimeError, ValueError, zenoh.ZError) as error:
         LOGGER.error("%s", error)
         return 1
     return 0
