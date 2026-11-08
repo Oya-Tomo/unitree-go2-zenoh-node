@@ -1,6 +1,6 @@
 [project]
 name = "unitree-go2-zenoh-node"
-version = "0.1.0"
+version = "0.2.0"
 description = "Control a Unitree Go2 SportClient through Zenoh"
 readme = "README.md"
 requires-python = ">=3.13"
