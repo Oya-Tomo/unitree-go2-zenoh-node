@@ -9,25 +9,17 @@ import signal
 import time
 from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, contextmanager
+from functools import partial
 from pathlib import Path
 from threading import Event, Thread
 from types import FrameType
 from typing import Any, Protocol
 
 import zenoh
-from pydantic import ValidationError
 
-from config import NodeConfig, load_node_config
-from controller import (
-    JSON_ENCODING,
-    Controller,
-    Keyspace,
-    PostureCommand,
-    RobotObservation,
-    SportClientProtocol,
-    VelocityCommand,
-    decode_command,
-)
+from config import NodeConfig, load_config
+from controller import Controller, RobotObservation, SportClientProtocol
+from wire import JSON_ENCODING, Keyspace, PostureCommand, VelocityCommand
 
 DEFAULT_NODE_CONFIG_PATH = Path("config/node-config.json5")
 DEFAULT_ZENOH_CONFIG_PATH = Path("config/zenoh-config.json5")
@@ -102,112 +94,6 @@ def to_observation(
     )
 
 
-class ZenohStateBus:
-    """Own Zenoh command ingress, queries, and periodic State publication."""
-
-    def __init__(
-        self,
-        session: zenoh.Session,
-        zenoh_key_prefix: str,
-        controller: Controller,
-        *,
-        state_publish_frequency_hz: float,
-    ) -> None:
-        self._session = session
-        self._keyspace = Keyspace(zenoh_key_prefix)
-        self._controller = controller
-        self._state_publish_period_seconds = 1.0 / state_publish_frequency_hz
-        self._resources = ExitStack()
-        self._publisher: zenoh.Publisher | None = None
-        self._publisher_stop = Event()
-        self._publisher_thread: Thread | None = None
-
-    def __enter__(self) -> ZenohStateBus:
-        try:
-            self._resources.enter_context(
-                self._session.declare_subscriber(
-                    self._keyspace.command,
-                    self._on_command,
-                )
-            )
-            self._resources.enter_context(
-                self._session.declare_queryable(
-                    self._keyspace.state,
-                    self._reply,
-                    complete=True,
-                )
-            )
-            self._publisher = self._resources.enter_context(
-                self._session.declare_publisher(
-                    self._keyspace.state,
-                    encoding=JSON_ENCODING,
-                )
-            )
-            self._publisher_thread = Thread(
-                target=self._run_publisher,
-                name="node-state-publisher",
-                daemon=True,
-            )
-            self._publisher_thread.start()
-        except Exception:
-            self._resources.close()
-            raise
-        return self
-
-    def __exit__(self, *_exc_info: object) -> None:
-        self._publisher_stop.set()
-        if self._publisher_thread is not None:
-            self._publisher_thread.join(timeout=PUBLISHER_JOIN_TIMEOUT_SECONDS)
-            if self._publisher_thread.is_alive():
-                LOGGER.error("Timed out stopping the Node State publisher")
-        self._resources.close()
-
-    def _publish(self) -> None:
-        publisher = self._publisher
-        assert publisher is not None
-        payload = self._controller.published_state().model_dump_json()
-        publisher.put(payload)
-
-    def _run_publisher(self) -> None:
-        deadline = time.monotonic()
-        while True:
-            if self._publisher_stop.wait(max(0.0, deadline - time.monotonic())):
-                try:
-                    self._publish()
-                except Exception as error:
-                    LOGGER.error("Failed to publish final Node State: %s", error)
-                return
-            try:
-                self._publish()
-            except Exception as error:
-                LOGGER.error("Failed to publish Node State: %s", error)
-            deadline = next_publish_deadline(
-                deadline,
-                now=time.monotonic(),
-                period_seconds=self._state_publish_period_seconds,
-            )
-
-    def _reply(self, query: zenoh.Query) -> None:
-        with query:
-            payload = self._controller.published_state().model_dump_json()
-            query.reply(
-                self._keyspace.state,
-                payload,
-                encoding=JSON_ENCODING,
-            )
-
-    def _on_command(self, sample: zenoh.Sample) -> None:
-        received_at = time.monotonic()
-        try:
-            command = decode_command(sample.payload.to_bytes())
-        except (UnicodeDecodeError, ValidationError, ValueError) as error:
-            LOGGER.warning("Rejected invalid Zenoh command: %s", error)
-            return
-        assert isinstance(command, (VelocityCommand, PostureCommand))
-        if not self._controller.receive_command(command, received_at=received_at):
-            LOGGER.debug("Ignored command while command input is disabled")
-
-
 def next_publish_deadline(
     deadline: float,
     *,
@@ -218,6 +104,83 @@ def next_publish_deadline(
 
     elapsed_periods = max(1, math.floor((now - deadline) / period_seconds) + 1)
     return deadline + elapsed_periods * period_seconds
+
+
+@contextmanager
+def serve_zenoh(
+    session: zenoh.Session,
+    keyspace: Keyspace,
+    controller: Controller,
+    *,
+    state_publish_frequency_hz: float,
+) -> Iterator[None]:
+    """Serve command intake, State queries, and periodic State publication."""
+
+    stop = Event()
+
+    def on_command(
+        model: type[VelocityCommand] | type[PostureCommand],
+        sample: zenoh.Sample,
+    ) -> None:
+        received_at = time.monotonic()
+        try:
+            command = model.model_validate_json(sample.payload.to_bytes())
+        except ValueError as error:
+            LOGGER.warning("Rejected invalid command on %s: %s", sample.key_expr, error)
+            return
+        if not controller.receive_command(command, received_at=received_at):
+            LOGGER.debug("Ignored command while command intake is closed")
+
+    def reply(query: zenoh.Query) -> None:
+        with query:
+            payload = controller.published_state().model_dump_json()
+            query.reply(keyspace.state, payload, encoding=JSON_ENCODING)
+
+    def publish_periodically(publisher: zenoh.Publisher) -> None:
+        period_seconds = 1.0 / state_publish_frequency_hz
+        deadline = time.monotonic()
+        while True:
+            stopping = stop.wait(max(0.0, deadline - time.monotonic()))
+            try:
+                publisher.put(controller.published_state().model_dump_json())
+            except Exception as error:
+                LOGGER.error("Failed to publish Node State: %s", error)
+            if stopping:
+                return
+            deadline = next_publish_deadline(
+                deadline,
+                now=time.monotonic(),
+                period_seconds=period_seconds,
+            )
+
+    with ExitStack() as resources:
+        for key, model in (
+            (keyspace.velocity, VelocityCommand),
+            (keyspace.posture, PostureCommand),
+        ):
+            resources.enter_context(
+                session.declare_subscriber(key, partial(on_command, model))
+            )
+        resources.enter_context(
+            session.declare_queryable(keyspace.state, reply, complete=True)
+        )
+        publisher = resources.enter_context(
+            session.declare_publisher(keyspace.state, encoding=JSON_ENCODING)
+        )
+        publisher_thread = Thread(
+            target=publish_periodically,
+            args=(publisher,),
+            name="node-state-publisher",
+            daemon=True,
+        )
+        publisher_thread.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            publisher_thread.join(timeout=PUBLISHER_JOIN_TIMEOUT_SECONDS)
+            if publisher_thread.is_alive():
+                LOGGER.error("Timed out stopping the Node State publisher")
 
 
 def create_unitree_resources(
@@ -264,12 +227,13 @@ def stop_on_signals(stop_event: Event) -> Iterator[None]:
 def run(zenoh_config: zenoh.Config, node_config: NodeConfig) -> None:
     zenoh.init_log_from_env_or("error")
     stop_event = Event()
+    keyspace = Keyspace(node_config.zenoh_key_prefix)
     client, subscriber = create_unitree_resources(node_config)
     controller = Controller(
         client,
         state_freshness_seconds=node_config.dds.state_freshness_seconds,
-        quiescent_linear_speed_mps=(node_config.robot_state.quiescent_linear_speed_mps),
-        quiescent_yaw_rate_rad_s=(node_config.robot_state.quiescent_yaw_rate_rad_s),
+        quiescent_linear_speed_mps=node_config.robot_state.quiescent_linear_speed_mps,
+        quiescent_yaw_rate_rad_s=node_config.robot_state.quiescent_yaw_rate_rad_s,
         velocity_command_timeout_seconds=(
             node_config.control.velocity_command_timeout_seconds
         ),
@@ -278,75 +242,57 @@ def run(zenoh_config: zenoh.Config, node_config: NodeConfig) -> None:
     def on_state(message: SportModeStateLike) -> None:
         received_at = time.monotonic()
         try:
-            observation = to_observation(
-                message,
-                received_at=received_at,
-            )
+            observation = to_observation(message, received_at=received_at)
         except (TypeError, ValueError) as error:
             controller.reject_observation(f"Invalid SportModeState: {error}")
         else:
             controller.receive_observation(observation)
 
-    last_processed_received_at: float | None = None
-
-    def process_next_observation(*, timeout: float) -> bool:
-        nonlocal last_processed_received_at
-        if not controller.wait_for_observation(
-            after=last_processed_received_at,
-            timeout=timeout,
-        ):
-            return False
-        processed_received_at = controller.process_observation(
-            after=last_processed_received_at,
-        )
-        if processed_received_at is None:
-            return False
-        last_processed_received_at = processed_received_at
-        return True
-
     with (
         zenoh.open(zenoh_config) as session,
-        ZenohStateBus(
+        serve_zenoh(
             session,
-            node_config.zenoh_key_prefix,
+            keyspace,
             controller,
-            state_publish_frequency_hz=(node_config.node_state_publish_frequency_hz),
+            state_publish_frequency_hz=node_config.node_state_publish_frequency_hz,
         ),
         stop_on_signals(stop_event),
+        ExitStack() as dds,
     ):
-        started = False
-        subscriber_started = False
+        # The newest consumed observation; None until control has started.
+        consumed: float | None = None
         run_error: str | None = None
         try:
             subscriber.Init(on_state, queueLen=1)
-            subscriber_started = True
+            dds.callback(subscriber.Close)
             startup_deadline = (
                 time.monotonic() + node_config.dds.first_state_timeout_seconds
             )
-            while not stop_event.is_set() and not controller.has_observation:
+            while consumed is None and not stop_event.is_set():
                 remaining = startup_deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeError("Timed out waiting for SportModeState")
-                process_next_observation(
+                consumed = controller.step(
+                    after=None,
                     timeout=min(CONTROL_WAIT_MAX_SECONDS, remaining),
                 )
-
-            if stop_event.is_set():
-                return
-            started = controller.has_observation
-            LOGGER.info(
-                "Listening for commands on %s/command",
-                node_config.zenoh_key_prefix,
-            )
-            while not stop_event.is_set():
-                process_next_observation(timeout=CONTROL_WAIT_MAX_SECONDS)
-                controller.enforce_observation_freshness()
+            if consumed is not None:
+                LOGGER.info(
+                    "Listening for commands on %s and %s",
+                    keyspace.velocity,
+                    keyspace.posture,
+                )
+                while not stop_event.is_set():
+                    consumed = controller.step(
+                        after=consumed,
+                        timeout=CONTROL_WAIT_MAX_SECONDS,
+                    )
         except Exception as error:
             run_error = str(error)
             raise
         finally:
             shutdown_error: str | None = None
-            if started:
+            if consumed is not None:
                 controller.begin_shutdown()
                 shutdown_deadline = (
                     time.monotonic() + node_config.control.shutdown_timeout_seconds
@@ -355,28 +301,25 @@ def run(zenoh_config: zenoh.Config, node_config: NodeConfig) -> None:
                     not controller.shutdown_complete
                     and time.monotonic() < shutdown_deadline
                 ):
-                    process_next_observation(timeout=CONTROL_WAIT_MAX_SECONDS)
-                    controller.enforce_observation_freshness()
-                shutdown_error = (
-                    None
-                    if controller.shutdown_complete
-                    else "Shutdown timed out before State confirmed down"
-                )
+                    consumed = controller.step(
+                        after=consumed,
+                        timeout=CONTROL_WAIT_MAX_SECONDS,
+                    )
+                if not controller.shutdown_complete:
+                    shutdown_error = "Shutdown timed out before State confirmed down"
             controller.finish_shutdown(run_error or shutdown_error)
-            if subscriber_started:
-                subscriber.Close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
     try:
-        node_config = load_node_config(args.node_config)
+        node_config = load_config(NodeConfig, args.node_config)
         zenoh_config = zenoh.Config.from_file(args.zenoh_config)
         run(zenoh_config, node_config)
     except KeyboardInterrupt:
         LOGGER.info("Stopped")
-    except (OSError, RuntimeError, ValueError, ValidationError, zenoh.ZError) as error:
+    except (OSError, RuntimeError, ValueError, zenoh.ZError) as error:
         LOGGER.error("%s", error)
         return 1
     return 0

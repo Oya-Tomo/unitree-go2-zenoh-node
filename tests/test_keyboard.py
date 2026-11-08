@@ -8,26 +8,17 @@ import sys
 import unittest
 from pathlib import Path
 
-from config import load_keyboard_config
-from controller import PostureTarget
+from config import KeyboardConfig, load_config
 from examples import keyboard
 from examples.keyboard import (
     ZERO_VELOCITY,
-    CommandPublisher,
     DeadmanState,
     approach,
     ramp_velocity,
+    velocity_payload,
 )
 
 ROOT = Path(__file__).parents[1]
-
-
-class PutRecorder:
-    def __init__(self) -> None:
-        self.payloads: list[str] = []
-
-    def __call__(self, payload: str) -> None:
-        self.payloads.append(payload)
 
 
 class KeyboardTests(unittest.TestCase):
@@ -62,7 +53,10 @@ class KeyboardTests(unittest.TestCase):
         self.assertEqual(approach(0.0, -1.0, 0.25), -0.25)
 
     def test_ramp_uses_each_axis_rate(self) -> None:
-        config = load_keyboard_config(ROOT / "examples/keyboard-config.example.json5")
+        config = load_config(
+            KeyboardConfig,
+            ROOT / "examples/keyboard-config.example.json5",
+        )
         velocity = ramp_velocity(
             ZERO_VELOCITY,
             (1.0, 1.0, 1.0),
@@ -78,28 +72,20 @@ class KeyboardTests(unittest.TestCase):
             ),
         )
 
-    def test_publisher_preserves_the_two_existing_command_types(self) -> None:
-        velocity_put = PutRecorder()
-        posture_put = PutRecorder()
-        publisher = CommandPublisher(velocity_put, posture_put)
-
-        publisher.publish_velocity((0.1, 0.2, 0.3))
-        publisher.publish_posture(PostureTarget.DOWN)
-
-        self.assertEqual(json.loads(velocity_put.payloads[0])["type"], "velocity")
+    def test_velocity_payload_matches_the_velocity_key_contract(self) -> None:
         self.assertEqual(
-            json.loads(posture_put.payloads[0]),
-            {"type": "posture", "posture": "down"},
+            json.loads(velocity_payload((0.1, 0.2, 0.3))),
+            {"vx": 0.1, "vy": 0.2, "vyaw": 0.3},
         )
 
     def test_focus_loss_requires_shift_release_before_rearming(self) -> None:
         deadman = DeadmanState()
-        self.assertTrue(deadman.is_armed(shift_pressed=True))
+        self.assertTrue(deadman.update(shift_pressed=True))
         deadman.focus_lost()
         deadman.focus_gained()
-        self.assertFalse(deadman.is_armed(shift_pressed=True))
-        self.assertFalse(deadman.is_armed(shift_pressed=False))
-        self.assertTrue(deadman.is_armed(shift_pressed=True))
+        self.assertFalse(deadman.update(shift_pressed=True))
+        self.assertFalse(deadman.update(shift_pressed=False))
+        self.assertTrue(deadman.update(shift_pressed=True))
 
 
 if __name__ == "__main__":

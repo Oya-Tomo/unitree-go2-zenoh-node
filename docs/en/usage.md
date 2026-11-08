@@ -150,6 +150,7 @@ Shift is the motion deadman and is also required when sending a posture request.
 The keyboard ramps local velocity toward the configured targets.
 It publishes the current velocity every update while running.
 It publishes posture only on the corresponding key-down event and does not retry posture requests.
+It does not query the node at startup; the dashboard shows `waiting` until the next periodic Node State arrives.
 
 ## Zenoh keys and command contract
 
@@ -157,13 +158,19 @@ For `zenoh_key_prefix: "unitree/go2"`, the node uses:
 
 | Key | Direction | Content |
 | --- | --- | --- |
-| `unitree/go2/command` | Keyboard/client to node | Velocity or posture JSON |
+| `unitree/go2/command/velocity` | Keyboard/client to node | Velocity command JSON |
+| `unitree/go2/command/posture` | Keyboard/client to node | Posture command JSON |
 | `unitree/go2/state` | Node to observers | Canonical Node State JSON; also available through Zenoh `get` |
+
+Each command kind has its own key, so Zenoh downsampling, QoS overwrite, and access-control rules can target velocity and posture separately.
+A payload is accepted only on its own key; a `type` field or another command's fields are rejected.
 
 ### Velocity command
 
+Key: `{zenoh_key_prefix}/command/velocity`
+
 ```json
-{"type":"velocity","vx":0.5,"vy":0.0,"vyaw":0.2}
+{"vx":0.5,"vy":0.0,"vyaw":0.2}
 ```
 
 | Field | Range |
@@ -176,12 +183,14 @@ The keyboard publishes velocity with drop congestion control and best-effort rel
 
 ### Posture command
 
+Key: `{zenoh_key_prefix}/command/posture`
+
 ```json
-{"type":"posture","posture":"stand"}
+{"posture":"stand"}
 ```
 
 ```json
-{"type":"posture","posture":"down"}
+{"posture":"down"}
 ```
 
 The only posture values are `stand` and `down`.
@@ -206,7 +215,7 @@ Zenoh `get` derives a reply directly from the latest coherent Node State.
 | `robot_state` | Latest classified robot observation or Unknown State |
 | `accepting_commands` | Single ingress gate for both velocity and posture |
 | `requested_posture` | Latest buffered or active posture target, otherwise `null` |
-| `requested_velocity` | Latest buffered velocity, otherwise `null` |
+| `requested_velocity` | Latest buffered velocity as `{"vx","vy","vyaw"}`, otherwise `null` |
 | `last_posture_action` | Last posture SDK step sent for the active workflow, otherwise `null` |
 | `last_sdk_diagnostic` | Latest SDK command diagnostic, otherwise `null` |
 | `last_node_error` | Latest node-level input or shutdown error, otherwise `null` |
@@ -230,7 +239,7 @@ There is no publication revision or process-local monotonic timestamp in this co
 
 ### SDK diagnostic fields
 
-`last_sdk_diagnostic` contains `command`, optional `velocity`, optional integer `code`, and optional `error`.
+`last_sdk_diagnostic` contains `command`, optional `velocity` (`{"vx","vy","vyaw"}` for `move`), optional integer `code`, and optional `error`.
 A nonzero SDK code is reported but does not establish or advance Robot State.
 In particular, `StopMove()` returning `-1` remains a diagnostic; the next observed State decides what can happen.
 
@@ -249,7 +258,7 @@ In particular, `StopMove()` returning `-1` remains a diagnostic; the next observ
 Measured motion never changes a movement-capable Ready stand or Locomotion into another State.
 It is used only to confirm quiescent Crouch as Down and to wait for quiescence between `StopMove()` and `StandDown()`.
 
-For the action table and concurrency decisions, see [ADR-0001](../adr/0001-observed-state-driven-control-architecture.md) and [ADR-0002](../adr/0002-shared-node-state-concurrency.md).
+For the action table and concurrency decisions, see [ADR-0001](../adr/0001-observed-state-driven-control-architecture.md) and [ADR-0002](../adr/0002-shared-node-state-concurrency.md); for the module boundary and command keys, see [ADR-0003](../adr/0003-wire-module-and-command-keys.md).
 
 ## Timing and execution
 
